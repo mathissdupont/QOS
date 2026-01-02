@@ -9,6 +9,8 @@ use crate::{ata, diskfs, interrupts, keyboard, syscall, vfs, vga};
 const LINE_MAX: usize = 80;
 const CWD_MAX: usize = 32;
 const HISTORY_MAX: usize = 16;
+const EDITOR_MAX_LINES: usize = 64;
+const EDITOR_LINE_MAX: usize = 80;
 
 static NEXT_CWD: Mutex<Option<([u8; CWD_MAX], usize)>> = Mutex::new(None);
 
@@ -41,6 +43,14 @@ pub struct ShellTask {
     history_pos: Option<usize>, // N from newest
     saved_line: [u8; LINE_MAX],
     saved_len: usize,
+    
+    // Editor mode
+    editor_mode: bool,
+    editor_path: [u8; 96],
+    editor_path_len: usize,
+    editor_lines: [[u8; EDITOR_LINE_MAX]; EDITOR_MAX_LINES],
+    editor_line_lens: [usize; EDITOR_MAX_LINES],
+    editor_line_count: usize,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq)]
@@ -52,7 +62,7 @@ enum KeyboardMode {
 impl ShellTask {
     pub fn new() -> Self {
         let kb = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore);
-        let (mut cwd, cwd_len) = if let Some((buf, n)) = take_next_cwd() {
+        let (cwd, cwd_len) = if let Some((buf, n)) = take_next_cwd() {
             (buf, n)
         } else {
             let mut buf = [0u8; CWD_MAX];
@@ -77,6 +87,13 @@ impl ShellTask {
             history_pos: None,
             saved_line: [0u8; LINE_MAX],
             saved_len: 0,
+            
+            editor_mode: false,
+            editor_path: [0u8; 96],
+            editor_path_len: 0,
+            editor_lines: [[0u8; EDITOR_LINE_MAX]; EDITOR_MAX_LINES],
+            editor_line_lens: [0usize; EDITOR_MAX_LINES],
+            editor_line_count: 0,
         }
     }
 
@@ -93,24 +110,17 @@ impl ShellTask {
     }
 
     fn tr_ascii_map(c: char) -> Option<char> {
-        // VGA console is ASCII-only today, so we use a practical transliteration.
-        // This makes TR keyboards usable for shell commands.
+        // Türkçe Q klavye mapping - sadece özel Türkçe karakterler için
+        // Köşeli parantez vs. olduğu gibi kalır (AltGr+8/9 ile yapılır)
+        // Bu mapping US layout üzerinden TR karakterleri yazmak için:
         Some(match c {
-            // Common TR-Q punctuation positions (approx):
-            // [ -> ğ, ] -> ü, ; -> ş, ' -> i/İ, , -> ö, . -> ç
-            '[' => 'g',
-            ']' => 'u',
-            ';' => 's',
-            '\'' => 'i',
-            ',' => 'o',
-            '.' => 'c',
-            // Shifted forms on US layout.
-            '{' => 'G',
-            '}' => 'U',
-            ':' => 'S',
-            '"' => 'I',
-            '<' => 'O',
-            '>' => 'C',
+            // Türkçe özel karakterler için kısayollar:
+            // Alt+g -> ğ, Alt+u -> ü, Alt+s -> ş, Alt+i -> ı, Alt+o -> ö, Alt+c -> ç
+            // Ama AltGr/Ctrl mapping karmaşık olduğundan,
+            // Şimdilik sadece ; -> ş ve ' -> ı mapping yapalım (sık kullanılan)
+            ';' => 's',  // noktalı virgül -> ş (ASCII s olarak)
+            '\'' => 'i', // apostrof -> ı (ASCII i olarak)
+            // Diğer karakterler olduğu gibi kalsın
             _ => return None,
         })
     }
@@ -191,38 +201,61 @@ impl ShellTask {
 
     fn prompt(&mut self) {
         if !self.banner_printed {
-            crate::println!("QOS kernel shell (type 'help')");
+            self.print_banner();
             self.banner_printed = true;
         }
         self.redraw_input_line();
     }
 
+    fn print_banner(&self) {
+        crate::vga::clear_screen();
+        crate::println!("");
+        crate::println!("    ___           ___           ___           ___     ");
+        crate::println!("   /\\  \\         /\\  \\         /\\  \\         /\\  \\    ");
+        crate::println!("  /::\\  \\       /::\\  \\       /::\\  \\       /::\\  \\   ");
+        crate::println!(" /:/\\:\\  \\     /:/\\:\\  \\     /:/\\:\\  \\     /:/\\ \\  \\  ");
+        crate::println!("/::\\~\\:\\  \\   /::\\~\\:\\  \\   /:/  \\:\\  \\   _\\:\\~\\ \\  \\ ");
+        crate::println!("/:/\\:\\ \\:\\__\\ /:/\\:\\ \\:\\__\\ /:/__/ \\:\\__\\ /\\ \\:\\ \\ \\__\\");
+        crate::println!("\\/__\\:\\/:/  / \\/__\\:\\/:/  / \\:\\  \\ /:/  / \\:\\ \\:\\ \\/__/");
+        crate::println!("     \\::/  /       \\::/  /   \\:\\  /:/  /   \\:\\ \\:\\__\\  ");
+        crate::println!("      \\/__/        /:/  /     \\:\\/:/  /     \\:\\/:/  /  ");
+        crate::println!("                  /:/  /       \\::/  /       \\::/  /   ");
+        crate::println!("                  \\/__/         \\/__/         \\/__/    ");
+        crate::println!("");
+        crate::println!("              Quantum Operating System v0.1.0");
+        crate::println!("");
+        crate::println!("  +----------------------------------------------------------+");
+        crate::println!("  |  Mouse Scroll: Navigate history    Arrows: Edit line    |");
+        crate::println!("  |  Type 'help' for available commands                     |");
+        crate::println!("  +----------------------------------------------------------+");
+        crate::println!("");
+    }
+
     fn redraw_input_line(&mut self) {
-        // Fixed bottom input line.
+        // Clean prompt at bottom of screen
         let row = vga::bottom_row();
-        vga::clear_row(row, vga::Color::LightGreen, vga::Color::Black);
+        vga::clear_row(row, vga::Color::LightGray, vga::Color::Black);
 
         let cwd = core::str::from_utf8(self.cwd_bytes()).unwrap_or("?");
-        let prompt = alloc::format!("qos:{}> ", cwd);
+        let prompt = alloc::format!("QaOS:{} $ ", cwd);
 
-        // Render prompt + current line content, padded/truncated to fit.
+        // Render prompt + current line content
         let mut s = alloc::string::String::new();
         s.push_str(&prompt);
 
         let line = core::str::from_utf8(&self.line[..self.len]).unwrap_or("<non-utf8>");
         s.push_str(line);
+        s.push('_'); // Cursor
 
-        // Keep it to one row.
+        // Keep it to one row
         if s.len() > 80 {
             s.truncate(80);
         }
-        vga::write_at(row, 0, &s, vga::Color::LightGreen, vga::Color::Black);
-
-        // If we shortened, ensure rest of row is blank.
-        if s.len() < 80 {
-            let pad = " ".repeat(80 - s.len());
-            vga::write_at(row, s.len(), &pad, vga::Color::LightGreen, vga::Color::Black);
-        }
+        
+        // Green prompt, white text
+        let prompt_len = prompt.len();
+        vga::write_at(row, 0, &prompt, vga::Color::LightGreen, vga::Color::Black);
+        vga::write_at(row, prompt_len, &s[prompt_len..], vga::Color::White, vga::Color::Black);
 
         self.prompt_shown = true;
     }
@@ -355,6 +388,155 @@ impl ShellTask {
         }
         Some((&s[..end], &s[end..]))
     }
+
+    // ==================== EDITOR ====================
+    
+    fn start_editor(&mut self, path: &[u8]) {
+        // Copy path
+        let n = core::cmp::min(path.len(), 96);
+        self.editor_path[..n].copy_from_slice(&path[..n]);
+        self.editor_path_len = n;
+        
+        // Clear editor buffer
+        self.editor_line_count = 0;
+        for i in 0..EDITOR_MAX_LINES {
+            self.editor_line_lens[i] = 0;
+        }
+        
+        // Try to load existing file
+        if let Ok(data) = vfs::read(path) {
+            let mut line_idx = 0;
+            let mut col = 0;
+            for &b in data.iter() {
+                if b == b'\n' {
+                    self.editor_line_lens[line_idx] = col;
+                    line_idx += 1;
+                    col = 0;
+                    if line_idx >= EDITOR_MAX_LINES {
+                        break;
+                    }
+                } else if col < EDITOR_LINE_MAX {
+                    self.editor_lines[line_idx][col] = b;
+                    col += 1;
+                }
+            }
+            // Handle last line without newline
+            if col > 0 && line_idx < EDITOR_MAX_LINES {
+                self.editor_line_lens[line_idx] = col;
+                line_idx += 1;
+            }
+            self.editor_line_count = line_idx;
+        }
+        
+        self.editor_mode = true;
+        self.len = 0; // Clear input line
+        
+        let path_str = core::str::from_utf8(path).unwrap_or("?");
+        crate::println!("--- EDITOR: {} ---", path_str);
+        crate::println!("Type lines. Commands: :w (save), :q (quit), :wq (save+quit)");
+        crate::println!("Lines: {}", self.editor_line_count);
+        crate::println!("---");
+    }
+    
+    fn editor_handle_line(&mut self) {
+        let input = &self.line[..self.len];
+        
+        // Check for commands
+        if input == b":q" {
+            self.editor_mode = false;
+            crate::println!("(quit without saving)");
+            return;
+        }
+        if input == b":w" {
+            self.editor_save();
+            crate::println!("(saved)");
+            return;
+        }
+        if input == b":wq" {
+            self.editor_save();
+            self.editor_mode = false;
+            crate::println!("(saved and quit)");
+            return;
+        }
+        if input == b":l" {
+            // List lines
+            crate::println!("--- {} lines ---", self.editor_line_count);
+            for i in 0..self.editor_line_count {
+                let line = &self.editor_lines[i][..self.editor_line_lens[i]];
+                let s = core::str::from_utf8(line).unwrap_or("?");
+                crate::println!("{:2}: {}", i + 1, s);
+            }
+            crate::println!("---");
+            return;
+        }
+        if input.starts_with(b":d") {
+            // Delete line :d <num>
+            let rest = &input[2..];
+            let mut rest = rest;
+            while let Some((&b, r)) = rest.split_first() {
+                if b == b' ' { rest = r; } else { break; }
+            }
+            if let Some(num) = Self::parse_u64(rest) {
+                let idx = num as usize;
+                if idx >= 1 && idx <= self.editor_line_count {
+                    // Shift lines up
+                    for i in (idx - 1)..(self.editor_line_count - 1) {
+                        self.editor_lines[i] = self.editor_lines[i + 1];
+                        self.editor_line_lens[i] = self.editor_line_lens[i + 1];
+                    }
+                    self.editor_line_count -= 1;
+                    crate::println!("(deleted line {})", idx);
+                } else {
+                    crate::println!("(invalid line number)");
+                }
+            }
+            return;
+        }
+        
+        // Add line to buffer
+        if self.editor_line_count >= EDITOR_MAX_LINES {
+            crate::println!("(buffer full, max {} lines)", EDITOR_MAX_LINES);
+            return;
+        }
+        
+        let n = core::cmp::min(input.len(), EDITOR_LINE_MAX);
+        self.editor_lines[self.editor_line_count][..n].copy_from_slice(&input[..n]);
+        self.editor_line_lens[self.editor_line_count] = n;
+        self.editor_line_count += 1;
+    }
+    
+    fn editor_save(&mut self) {
+        // Build content with newlines
+        let mut data = alloc::vec::Vec::new();
+        for i in 0..self.editor_line_count {
+            let line = &self.editor_lines[i][..self.editor_line_lens[i]];
+            data.extend_from_slice(line);
+            data.push(b'\n');
+        }
+        
+        let path = &self.editor_path[..self.editor_path_len];
+        match vfs::write(path, &data) {
+            Ok(()) => {
+                let path_str = core::str::from_utf8(path).unwrap_or("?");
+                crate::println!("Wrote {} bytes to {}", data.len(), path_str);
+            }
+            Err(e) => crate::println!("Save error: {:?}", e),
+        }
+    }
+    
+    fn editor_prompt(&mut self) {
+        let row = vga::bottom_row();
+        vga::clear_row(row, vga::Color::LightGray, vga::Color::Black);
+        
+        let prompt = alloc::format!("[{}]> ", self.editor_line_count + 1);
+        let line = core::str::from_utf8(&self.line[..self.len]).unwrap_or("");
+        let display = alloc::format!("{}{}_ ", prompt, line);
+        
+        vga::write_at(row, 0, &prompt, vga::Color::Yellow, vga::Color::Black);
+        vga::write_at(row, prompt.len(), &display[prompt.len()..], vga::Color::White, vga::Color::Black);
+    }
+
+    // ==================== END EDITOR ====================
 
     fn run_command(&mut self, line: &[u8]) {
         // trim leading spaces
@@ -629,19 +811,43 @@ impl ShellTask {
             } else {
                 b"/ram"
             };
+            // Handle special cases
+            if target == b".." {
+                // Go up one directory
+                if let Some(pos) = self.cwd_bytes().iter().rposition(|&b| b == b'/') {
+                    if pos == 0 {
+                        self.set_cwd(b"/");
+                    } else {
+                        let parent = &self.cwd[..pos];
+                        let mut tmp = [0u8; CWD_MAX];
+                        tmp[..pos].copy_from_slice(parent);
+                        self.cwd_len = pos;
+                        self.cwd = tmp;
+                    }
+                }
+                return;
+            }
             let mut buf = [0u8; 96];
             let Some(n) = self.resolve_path(target, &mut buf) else {
                 crate::println!("cd: bad path");
                 return;
             };
             let resolved = &buf[..n];
-            match resolved {
-                b"/" | b"/ram" | b"/disk" => {
+            // Check if it's a valid directory
+            if resolved == b"/" || resolved == b"/ram" || resolved == b"/disk" {
+                self.set_cwd(resolved);
+            } else if resolved.starts_with(b"/ram/") {
+                // Check if it exists and is a directory in ramfs
+                let subpath = &resolved[5..];
+                if crate::fs::is_dir(subpath) {
                     self.set_cwd(resolved);
+                } else if crate::fs::exists(subpath) {
+                    crate::println!("cd: not a directory");
+                } else {
+                    crate::println!("cd: no such directory");
                 }
-                _ => {
-                    crate::println!("cd: only /, /ram, /disk supported");
-                }
+            } else {
+                crate::println!("cd: no such directory");
             }
         } else if Self::eq(cmd, b"ls") {
             let dir = if let Some((p, _)) = Self::parse_word(args) {
@@ -679,6 +885,33 @@ impl ShellTask {
                 }
                 Err(e) => crate::println!("err: {:?}", e),
             }
+        } else if Self::eq(cmd, b"write") {
+            let Some((path, rest)) = Self::parse_word(args) else {
+                crate::println!("usage: write <path> <data>");
+                return;
+            };
+            let mut buf = [0u8; 96];
+            let Some(n) = self.resolve_path(path, &mut buf) else {
+                crate::println!("write: bad path");
+                return;
+            };
+            // Trim leading whitespace from rest (the data)
+            let mut data = rest;
+            while let Some((&b, r)) = data.split_first() {
+                if b == b' ' || b == b'\t' {
+                    data = r;
+                } else {
+                    break;
+                }
+            }
+            if data.is_empty() {
+                crate::println!("usage: write <path> <data>");
+                return;
+            }
+            match vfs::write(&buf[..n], data) {
+                Ok(()) => crate::println!("ok"),
+                Err(e) => crate::println!("err: {:?}", e),
+            }
         } else if Self::eq(cmd, b"rm") {
             let Some((name, _rest)) = Self::parse_word(args) else {
                 crate::println!("usage: rm <path>");
@@ -691,6 +924,20 @@ impl ShellTask {
             };
             match vfs::remove(&buf[..n]) {
                 Ok(()) => crate::println!("removed"),
+                Err(e) => crate::println!("err: {:?}", e),
+            }
+        } else if Self::eq(cmd, b"mkdir") {
+            let Some((name, _rest)) = Self::parse_word(args) else {
+                crate::println!("usage: mkdir <path>");
+                return;
+            };
+            let mut buf = [0u8; 96];
+            let Some(n) = self.resolve_path(name, &mut buf) else {
+                crate::println!("mkdir: bad path");
+                return;
+            };
+            match vfs::mkdir(&buf[..n]) {
+                Ok(()) => crate::println!("created"),
                 Err(e) => crate::println!("err: {:?}", e),
             }
         } else if Self::eq(cmd, b"mkbell") {
@@ -726,8 +973,11 @@ impl ShellTask {
                     return;
                 }
             };
-            match syscall::shell_submit_ir_qasm2(&bytes, shots, 0) {
-                Some(h) => crate::println!("submitted handle={} (shots={})", h, shots),
+            // Parse QASM to get n_qubits
+            let qasm_str = core::str::from_utf8(&bytes).unwrap_or("");
+            let n_qubits = crate::quantum::count_qubits_from_qasm(qasm_str);
+            match syscall::shell_submit_ir_qasm2(&bytes, shots, n_qubits) {
+                Some(h) => crate::println!("submitted handle={} (shots={}, qubits={})", h, shots, n_qubits),
                 None => crate::println!("submit failed"),
             }
         } else if Self::eq(cmd, b"disk-id") {
@@ -1028,6 +1278,17 @@ impl ShellTask {
             } else {
                 crate::println!("cancel failed {}", h);
             }
+        } else if Self::eq(cmd, b"edit") {
+            let Some((path, _rest)) = Self::parse_word(args) else {
+                crate::println!("usage: edit <path>");
+                return;
+            };
+            let mut buf = [0u8; 96];
+            let Some(n) = self.resolve_path(path, &mut buf) else {
+                crate::println!("edit: bad path");
+                return;
+            };
+            self.start_editor(&buf[..n]);
         } else {
             crate::println!("unknown command");
         }
@@ -1036,7 +1297,12 @@ impl ShellTask {
 
 impl crate::scheduler::Task for ShellTask {
     fn step(&mut self) {
-        self.prompt();
+        // Editor mode has different prompt
+        if self.editor_mode {
+            self.editor_prompt();
+        } else {
+            self.prompt();
+        }
 
         // Limit work so keyboard bursts don't starve.
         for _ in 0..32 {
@@ -1056,17 +1322,24 @@ impl crate::scheduler::Task for ShellTask {
                             let mut tmp = [0u8; LINE_MAX];
                             tmp[..len].copy_from_slice(&self.line[..len]);
 
-                            // Save into history before executing (so arrow-up works immediately).
-                            self.history_push(&tmp[..len]);
+                            if self.editor_mode {
+                                // Handle editor input
+                                self.editor_handle_line();
+                                self.clear_line();
+                                self.editor_prompt();
+                            } else {
+                                // Save into history before executing (so arrow-up works immediately).
+                                self.history_push(&tmp[..len]);
 
-                            // Echo command into the scrolling output region for history.
-                            let cwd = core::str::from_utf8(self.cwd_bytes()).unwrap_or("?");
-                            let cmd_s = core::str::from_utf8(&tmp[..len]).unwrap_or("<non-utf8>");
-                            crate::println!("qos:{}> {}", cwd, cmd_s);
+                                // Echo command into the scrolling output region for history.
+                                let cwd = core::str::from_utf8(self.cwd_bytes()).unwrap_or("?");
+                                let cmd_s = core::str::from_utf8(&tmp[..len]).unwrap_or("<non-utf8>");
+                                crate::println!("qos:{}> {}", cwd, cmd_s);
 
-                            self.run_command(&tmp[..len]);
-                            self.clear_line();
-                            self.redraw_input_line();
+                                self.run_command(&tmp[..len]);
+                                self.clear_line();
+                                self.redraw_input_line();
+                            }
                             return;
                         }
                         DecodedKey::Unicode('\r') => {

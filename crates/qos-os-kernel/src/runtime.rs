@@ -1,4 +1,4 @@
-use crate::{arch, scheduler, serial, shell, ui, vga};
+use crate::{arch, scheduler, serial, shell, syscall, ui, vga};
 
 const KERNEL_LOOP_STACK_SIZE: usize = 4096 * 8;
 static mut KERNEL_LOOP_STACK: [u8; KERNEL_LOOP_STACK_SIZE] = [0; KERNEL_LOOP_STACK_SIZE];
@@ -22,6 +22,8 @@ extern "C" fn kernel_loop_entry() -> ! {
     sched.add_task(shell::ShellTask::new());
 
     loop {
+        // Process quantum work from main loop (NOT interrupt) to avoid deadlocks
+        syscall::process_quantum_work();
         sched.step();
         arch::hlt();
     }

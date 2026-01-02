@@ -58,6 +58,7 @@ pub fn list_dir(path: &[u8]) -> Result<(), VfsError> {
     // Supported dirs:
     // - /          => show mounts
     // - /ram       => list ram files
+    // - /ram/...   => list subdir in ram
     // - /disk      => list disk files
     match path {
         b"/" => {
@@ -67,7 +68,7 @@ pub fn list_dir(path: &[u8]) -> Result<(), VfsError> {
             Ok(())
         }
         b"/ram" => {
-            crate::fs::list();
+            crate::fs::list_dir(b"");
             Ok(())
         }
         b"/disk" => {
@@ -80,7 +81,55 @@ pub fn list_dir(path: &[u8]) -> Result<(), VfsError> {
                 Err(VfsError::Io)
             }
         }
+        _ if path.starts_with(b"/ram/") => {
+            let subpath = &path[5..];
+            crate::fs::list_dir(subpath);
+            Ok(())
+        }
         _ => Err(VfsError::BadPath),
+    }
+}
+
+/// Create a directory
+pub fn mkdir(path: &[u8]) -> Result<(), VfsError> {
+    let (m, name) = split_mount(path)?;
+    match m {
+        Mount::Ram => crate::fs::mkdir(name).map_err(|e| match e {
+            "parent not found" => VfsError::NotFound,
+            "already exists" => VfsError::BadPath,
+            _ => VfsError::Io,
+        }),
+        Mount::Disk => Err(VfsError::Io), // Not supported on disk yet
+    }
+}
+
+/// Check if path exists
+pub fn exists(path: &[u8]) -> bool {
+    if path == b"/" || path == b"/ram" || path == b"/disk" {
+        return true;
+    }
+    if let Ok((m, name)) = split_mount(path) {
+        match m {
+            Mount::Ram => crate::fs::exists(name),
+            Mount::Disk => false, // TODO
+        }
+    } else {
+        false
+    }
+}
+
+/// Check if path is a directory
+pub fn is_dir(path: &[u8]) -> bool {
+    if path == b"/" || path == b"/ram" || path == b"/disk" {
+        return true;
+    }
+    if let Ok((m, name)) = split_mount(path) {
+        match m {
+            Mount::Ram => crate::fs::is_dir(name),
+            Mount::Disk => false,
+        }
+    } else {
+        false
     }
 }
 
@@ -115,11 +164,11 @@ pub fn remove(path: &[u8]) -> Result<(), VfsError> {
     let (m, name) = split_mount(path)?;
     match m {
         Mount::Ram => {
-            if crate::fs::remove(name) {
-                Ok(())
-            } else {
-                Err(VfsError::NotFound)
-            }
+            crate::fs::remove(name).map_err(|e| match e {
+                "not found" => VfsError::NotFound,
+                "directory not empty" => VfsError::Io,
+                _ => VfsError::Io,
+            })
         }
         Mount::Disk => {
             if !crate::diskfs::is_formatted() {

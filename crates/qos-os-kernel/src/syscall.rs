@@ -1,4 +1,4 @@
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use alloc::vec::Vec;
 use alloc::string::String;
@@ -29,6 +29,8 @@ static LAST_SLOT: AtomicU32 = AtomicU32::new(0);
 /// Global counter of qubits currently in use by running jobs
 pub static USED_QUBITS: AtomicUsize = AtomicUsize::new(0);
 static TOTAL_GATES_EXECUTED: AtomicU64 = AtomicU64::new(0);
+/// Flag to signal that quantum work is pending (set by timer, processed by main loop)
+static QUANTUM_WORK_PENDING: AtomicBool = AtomicBool::new(false);
 
 /// Information about a job for UI display
 #[derive(Clone)]
@@ -187,21 +189,27 @@ impl JobSlot {
         match parse_qasm(ir_str) {
             Ok(circuit) => {
                 let n_qubits = circuit.n_qubits;
+                // Store the actual qubit count from the parsed circuit
+                self.n_qubits.store(n_qubits as u32, Ordering::Relaxed);
                 *self.circuit.lock() = Some(circuit);
                 *self.quantum_state.lock() = Some(QuantumState::new(n_qubits));
                 self.current_shot.store(0, Ordering::Relaxed);
                 true
             }
-            Err(_) => false,
+            Err(_e) => {
+                false
+            }
         }
     }
     
     /// Reset for next shot
     fn reset_for_shot(&self) {
-        if let Some(ref mut state) = *self.quantum_state.lock() {
+        let mut state_guard = self.quantum_state.lock();
+        if let Some(state) = state_guard.as_mut() {
             state.reset();
         }
-        if let Some(ref mut circuit) = *self.circuit.lock() {
+        let mut circuit_guard = self.circuit.lock();
+        if let Some(circuit) = circuit_guard.as_mut() {
             circuit.pc = 0;
         }
     }
@@ -316,21 +324,21 @@ fn schedule_slot(idx: usize) {
         return;
     }
     
-    // Reserve qubits using USED_QUBITS
-    let n_qubits = slot.n_qubits.load(Ordering::Relaxed) as usize;
-    let used = USED_QUBITS.load(Ordering::Relaxed);
-    if used + n_qubits > MAX_QUBITS {
-        return; // Not enough qubits
-    }
-    USED_QUBITS.fetch_add(n_qubits, Ordering::Relaxed);
-    
-    // Initialize circuit for execution
+    // Initialize circuit FIRST to determine actual qubit count from QASM
     if !slot.init_circuit() {
-        // Parse failed - mark as failed and release qubits
-        USED_QUBITS.fetch_sub(n_qubits, Ordering::Relaxed);
+        // Parse failed - mark as failed
         slot.state.store(StateRaw::Failed as u32, Ordering::Relaxed);
         return;
     }
+    
+    // NOW reserve qubits using the actual count from parsed circuit
+    let n_qubits = slot.n_qubits.load(Ordering::Relaxed) as usize;
+    let used = USED_QUBITS.load(Ordering::Relaxed);
+    if used + n_qubits > MAX_QUBITS {
+        slot.clear_circuit();
+        return; // Not enough qubits
+    }
+    USED_QUBITS.fetch_add(n_qubits, Ordering::Relaxed);
     
     CURRENT_RUNNING.store(handle, Ordering::Relaxed);
     LAST_SLOT.store(idx as u32, Ordering::Relaxed);
@@ -549,10 +557,22 @@ pub fn shell_cancel(handle: u64) -> bool {
 }
 
 /// Called from the PIT timer interrupt handler.
-/// Executes GATES_PER_TICK gates from the current job's circuit.
+/// Just sets a flag - actual work is done in process_quantum_work() from main loop.
+/// This avoids deadlocks from taking Mutex locks in interrupt context.
 pub fn on_timer_tick() {
+    QUANTUM_WORK_PENDING.store(true, Ordering::Relaxed);
+}
+
+/// Process quantum work - MUST be called from main loop, NOT from interrupt handler!
+/// This does the actual quantum gate execution.
+pub fn process_quantum_work() {
+    if !QUANTUM_WORK_PENDING.swap(false, Ordering::Relaxed) {
+        return;
+    }
+    
     let current = CURRENT_RUNNING.load(Ordering::Relaxed);
     if current == 0 {
+        // Try to schedule a queued job
         maybe_schedule();
         return;
     }
@@ -642,8 +662,9 @@ pub fn on_timer_tick() {
                     // Check if we need more shots
                     let total_shots = slot.shots.load(Ordering::Relaxed);
                     if new_shots_done < total_shots {
-                        // Reset for next shot
-                        slot.reset_for_shot();
+                        // Reset for next shot - directly on already-locked guards
+                        qs.reset();
+                        circ.pc = 0;
                     } else {
                         // All shots complete - mark shots_total as done
                         slot.shots_total.store(new_shots_done, Ordering::Relaxed);

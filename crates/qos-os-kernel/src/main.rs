@@ -41,6 +41,7 @@ mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod gui;        // Window manager & GUI
 mod timer;      // Timer utilities
+mod mouse;      // PS/2 Mouse driver
 
 use bootloader::{entry_point, BootInfo};
 
@@ -49,11 +50,11 @@ entry_point!(kernel_main);
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::init();
 
-    serial::println!("QOS-OS boot OK (serial)");
+    serial::println!("QaOS boot OK (serial)");
 
     vga::clear_screen();
-    vga::println!("QOS-OS boot OK");
-    vga::println!("(Milestone 1) init paging + heap...");
+    vga::println!("QaOS - Quantum Operating System v0.1.0");
+    vga::println!("Initializing kernel...");
 
     let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
     unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_map) };
@@ -64,21 +65,22 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let heap_test = alloc::boxed::Box::new(0xC0FF_EEu64);
     crate::serial_println!("heap test ok: 0x{:x}", *heap_test);
-    vga::println!("heap init OK");
+    vga::println!("[OK] Memory & heap initialized");
 
     gdt::init();
     interrupts::init_idt();
     interrupts::init_pics();
     pit::init_timer(100);
+    mouse::init();        // PS/2 Mouse with scroll wheel
 
     // Initialize production-level subsystems
-    vga::println!("Initializing hardware...");
+    vga::println!("[..] Detecting hardware...");
     rtc::init();          // Real-Time Clock
     pci::init();          // PCI bus enumeration
-    acpi::init();         // ACPI power management
-    ahci::init();         // SATA/AHCI (falls back to ATA)
+    // acpi::init();      // ACPI - disabled (needs low memory mapping)
+    // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
     syscall_ext::init();  // Extended syscalls
-    net::init();          // Network stack
+    // net::init();       // Network stack - disabled (needs working hw)
     gui::init();          // Window manager
     
     // Show system info
@@ -86,7 +88,8 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("System Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         datetime.year, datetime.month, datetime.day,
         datetime.hour, datetime.minute, datetime.second);
-    vga::println!("Hardware init OK - {}", rtc::time_string());
+    vga::println!("[OK] Hardware initialized - {}", rtc::time_string());
+    vga::println!("");
 
     #[cfg(feature = "userdemo")]
     {
@@ -97,16 +100,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     #[cfg(all(not(feature = "userdemo"), not(feature = "userabi")))]
     {
-        // Milestone 2 smoke-check (kernel-mode): ensure the syscall gate (int 0x80) is installed.
-        // Temporarily disabled due to LLVM asm bug
-        // x86_64::instructions::interrupts::software_interrupt! is not available
-        // We skip the int 0x80 test for now - syscall handler is still installed
-        vga::println!("syscall gate installed (int 0x80 test skipped)");
+        // Syscall gate is installed
     }
 
-    vga::println!("(Milestone 1) IRQs enabled. Type on keyboard...");
-
-    crate::serial_println!("IRQs enabled. PIT=100Hz. Type keys...");
+    crate::serial_println!("QaOS ready. Type on keyboard...");
 
     #[cfg(feature = "verify")]
     {

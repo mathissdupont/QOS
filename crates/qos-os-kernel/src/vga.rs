@@ -386,6 +386,16 @@ pub fn scroll_reset() {
     render_viewport();
 }
 
+/// Alias for mouse scroll
+pub fn scroll_up_lines(n: usize) {
+    scroll_up(n);
+}
+
+/// Alias for mouse scroll  
+pub fn scroll_down_lines(n: usize) {
+    scroll_down(n);
+}
+
 pub fn clear_row(row: usize, fg: Color, bg: Color) {
     if row >= BUFFER_HEIGHT {
         return;
