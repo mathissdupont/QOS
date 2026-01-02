@@ -16,5 +16,6 @@ fn main() {
         println!("cargo:rustc-link-arg=-no-pie");
 
         println!("cargo:rerun-if-changed={}", script.display());
+        println!("cargo:rerun-if-changed=src/asm_stubs.s");
     }
 }

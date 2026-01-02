@@ -10,6 +10,10 @@ use spin::Mutex;
 
 use crate::{elf, gdt, memory, serial, vga};
 
+extern "C" {
+    fn asm_iretq_to_user(rip: u64, rsp: u64, cs: u64, ss: u64, rflags: u64) -> !;
+}
+
 static USER_MAPPED_PAGES: Mutex<Vec<Page<Size4KiB>>> = Mutex::new(Vec::new());
 
 pub struct SpawnedUserProcess {
@@ -843,19 +847,5 @@ unsafe fn iretq_to_user(entry: VirtAddr, user_stack_top: VirtAddr) -> ! {
     let rsp_val = user_stack_top.as_u64();
     let rip_val = entry.as_u64();
     
-    // Simple approach: no label, no complex operands
-    core::arch::asm!(
-        "push {ss}",
-        "push {rsp}",
-        "push {rflags}",
-        "push {cs}",
-        "push {rip}",
-        "iretq",
-        ss = in(reg) ss_val,
-        rsp = in(reg) rsp_val,
-        rflags = in(reg) rflags,
-        cs = in(reg) cs_val,
-        rip = in(reg) rip_val,
-        options(noreturn)
-    );
+    asm_iretq_to_user(rip_val, rsp_val, cs_val, ss_val, rflags);
 }
