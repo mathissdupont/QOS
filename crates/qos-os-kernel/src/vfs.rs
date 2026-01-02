@@ -107,12 +107,6 @@ pub fn normalize_path(path: &[u8], out: &mut [u8; 128]) -> Option<usize> {
         len += comp.len();
     }
     
-    // Root case
-    if len == 0 {
-        out[0] = b'/';
-        len = 1;
-    }
-    
     Some(len)
 }
 
