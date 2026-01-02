@@ -20,6 +20,8 @@ asm_triple_fault:
 .type asm_iretq_to_user, @function
 # Arguments (SysV):
 #   rdi = rip, rsi = rsp, rdx = cs, rcx = ss, r8 = rflags
+# Stack layout required by iretq (top of stack first): RIP, CS, RFLAGS, RSP, SS.
+# Push order below builds that layout in reverse so hardware pops the correct state.
 asm_iretq_to_user:
     # Stack on entry: 16-byte aligned in caller, misaligned here by call's return address.
     # We deliberately keep the return address; pushing 5 qwords realigns the stack
