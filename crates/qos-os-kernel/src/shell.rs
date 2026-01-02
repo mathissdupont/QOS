@@ -618,6 +618,15 @@ impl ShellTask {
             crate::println!("  shutdown        - shutdown the system");
             crate::println!("  reboot          - reboot the system");
             crate::println!("  powerinfo       - show ACPI power info");
+            #[cfg(feature = "fat")]
+            {
+                crate::println!("");
+                crate::println!("== FAT16 Commands (if available) ==");
+                crate::println!("  fatls           - list FAT16 root directory");
+                crate::println!("  fatcat <file>   - print FAT16 file contents");
+                crate::println!("  fatwrite <f> <t> - write text to FAT16 file");
+                crate::println!("  fatrm <file>    - delete FAT16 file");
+            }
         } else if Self::eq(cmd, b"kbd") {
             let Some((arg, _)) = Self::parse_word(args) else {
                 crate::println!("keyboard: {}", self.kbd_name());
@@ -1289,7 +1298,87 @@ impl ShellTask {
                 return;
             };
             self.start_editor(&buf[..n]);
-        } else {
+        }
+        // FAT16 commands (optional, behind 'fat' feature flag)
+        #[cfg(feature = "fat")]
+        {
+            if Self::eq(cmd, b"fatls") {
+                if !crate::fat16::is_fat16() {
+                    crate::println!("error: FAT16 filesystem not available");
+                    return;
+                }
+                crate::fat16::list();
+                return;
+            }
+            if Self::eq(cmd, b"fatcat") {
+                let Some((name, _)) = Self::parse_word(args) else {
+                    crate::println!("usage: fatcat <file>");
+                    return;
+                };
+                if !crate::fat16::is_fat16() {
+                    crate::println!("error: FAT16 filesystem not available");
+                    return;
+                }
+                match crate::fat16::read(name) {
+                    Some(bytes) => {
+                        let s = core::str::from_utf8(&bytes).unwrap_or("<non-utf8>");
+                        crate::println!("{}", s);
+                    }
+                    None => crate::println!("error: file not found"),
+                }
+                return;
+            }
+            if Self::eq(cmd, b"fatwrite") {
+                let Some((name, rest)) = Self::parse_word(args) else {
+                    crate::println!("usage: fatwrite <file> <text>");
+                    return;
+                };
+                let mut text = rest;
+                while let Some((&b, r)) = text.split_first() {
+                    if b == b' ' || b == b'\t' {
+                        text = r;
+                    } else {
+                        break;
+                    }
+                }
+                if text.is_empty() {
+                    crate::println!("usage: fatwrite <file> <text>");
+                    return;
+                }
+                if !crate::fat16::is_fat16() {
+                    crate::println!("error: FAT16 filesystem not available");
+                    return;
+                }
+                let name_str = core::str::from_utf8(name).unwrap_or("");
+                match crate::fat16::write(name_str.as_bytes(), text) {
+                    Ok(()) => crate::println!("wrote {} bytes to {}", text.len(), name_str),
+                    Err(e) => crate::println!("error: {}", e),
+                }
+                return;
+            }
+            if Self::eq(cmd, b"fatrm") {
+                let Some((name, _)) = Self::parse_word(args) else {
+                    crate::println!("usage: fatrm <file>");
+                    return;
+                };
+                if !crate::fat16::is_fat16() {
+                    crate::println!("error: FAT16 filesystem not available");
+                    return;
+                }
+                if crate::fat16::remove(name) {
+                    crate::println!("removed");
+                } else {
+                    crate::println!("error: file not found");
+                }
+                return;
+            }
+        }
+        // Unknown command fallback
+        if !Self::eq(cmd, b"edit") {
+            #[cfg(feature = "fat")]
+            if Self::eq(cmd, b"fatls") || Self::eq(cmd, b"fatcat") || Self::eq(cmd, b"fatwrite") || Self::eq(cmd, b"fatrm") {
+                return; // Already handled above
+            }
             crate::println!("unknown command");
         }
     }
