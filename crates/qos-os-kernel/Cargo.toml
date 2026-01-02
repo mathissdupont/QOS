@@ -1,0 +1,31 @@
+[package]
+name = "os"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bootloader = { version = "0.9", features = ["map_physical_memory"] }
+spin = "0.9"
+lazy_static = { version = "1.4", features = ["spin_no_std"] }
+x86_64 = { version = "0.15", features = ["abi_x86_interrupt"] }
+pic8259 = "0.11"
+pc-keyboard = "0.8"
+linked_list_allocator = "0.10"
+qos-abi = { path = "../qos-abi", default-features = false }
+libm = "0.2"
+
+[features]
+default = []
+userabi = []
+userdemo = ["userabi"]
+verify = []
+
+[package.metadata.bootimage]
+# Windows (winget) default install path.
+run-command = ["C:/Program Files/qemu/qemu-system-x86_64.exe", "-drive", "if=ide,index=0,media=disk,format=raw,file={}", "-serial", "stdio"]
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,17 @@
+[workspace]
+members = [
+  "crates/qos-abi",
+  "crates/qos-core",
+  "crates/qosd",
+  "crates/qos-pybridge",
+  "crates/qos-os-kernel",
+  "crates/qos-os-xtask",
+  "crates/qos-userdemo",
+]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"

@@ -1,0 +1,19 @@
+[package]
+name = "qos-pybridge"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Default to a pure-Rust stub simulator so `cargo build -p qosd` works on fresh Windows installs.
+default = ["stub"]
+
+# Uses embedded Python (pyo3) to run python/qossim.
+python = ["dep:pyo3"]
+
+# Pure Rust stub simulator (no external deps).
+stub = []
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["auto-initialize"], optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

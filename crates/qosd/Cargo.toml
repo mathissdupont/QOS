@@ -1,0 +1,23 @@
+[package]
+name = "qosd"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+# Default: pure Rust stub simulator (works without Python).
+default = []
+
+# Enable embedded Python backend via qos-pybridge.
+python = ["qos-pybridge/python"]
+
+[dependencies]
+qos-abi = { path = "../qos-abi", features = ["serde"] }
+qos-core = { path = "../qos-core" }
+qos-pybridge = { path = "../qos-pybridge" }
+
+axum = "0.7.9"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["serde", "v4"] }

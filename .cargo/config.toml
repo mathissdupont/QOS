@@ -1,0 +1,16 @@
+[alias]
+xtask = "run -p qos-os-xtask --"
+
+# Convenience aliases for the bare-metal kernel package (`os`).
+os-build = "build -p os --target x86_64-unknown-none -Zbuild-std=core,alloc"
+os-run = "run -p os --target x86_64-unknown-none -Zbuild-std=core,alloc"
+os-bootimage = "bootimage -p os --target x86_64-unknown-none"
+os-verify = "run -p qos-os-xtask -- verify"
+
+# QEMU running is handled by the bootimage runner when you do:
+#   cargo run -p os --target x86_64-unknown-none
+# (requires cargo-bootimage + qemu-system-x86_64 in PATH)
+
+[target.x86_64-unknown-none]
+runner = "bootimage runner"
+rustflags = ["-Zunstable-options", "-Cpanic=abort"]
