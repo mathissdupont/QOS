@@ -295,7 +295,8 @@ fn run_fs() -> Result<()> {
     ensure_min_len(&fs_img, 16 * 1024 * 1024).context("failed to create/pad qos-fs.img")?;
 
     let qemu = qemu_exe();
-    if !qemu.exists() {
+    // On Linux, qemu-system-x86_64 is in PATH, not a file path - skip existence check
+    if !cfg!(target_os = "linux") && !qemu.exists() {
         bail!(
             "QEMU not found at {} (edit qos-os-kernel Cargo.toml or set QEMU_EXE)",
             qemu.display()
@@ -305,20 +306,25 @@ fn run_fs() -> Result<()> {
     let bootimage = qemu_rel_path(&bootimage);
     let fs_img = qemu_rel_path(&fs_img);
 
-    // Interactive windowed QEMU: COM1 to stdio so you still see serial.
-    let status = Command::new(qemu)
-        .arg("-drive")
+    // QEMU with optional graphics (headless on Linux/Docker)
+    let mut cmd = Command::new(qemu);
+    cmd.arg("-drive")
         .arg(format!("if=ide,index=0,media=disk,format=raw,file={bootimage}"))
         .arg("-drive")
         .arg(format!("if=ide,index=1,media=disk,format=raw,file={fs_img}"))
         .arg("-device")
         .arg("isa-debug-exit,iobase=0xf4,iosize=0x04")
         .arg("-boot")
-        .arg("order=c")
-        .arg("-serial")
-        .arg("stdio")
-        .status()
-        .context("qemu run failed")?;
+        .arg("order=c");
+    
+    // Headless mode for Docker/CI environments
+    if cfg!(target_os = "linux") {
+        cmd.arg("-nographic").arg("-serial").arg("mon:stdio");
+    } else {
+        cmd.arg("-serial").arg("stdio");
+    }
+    
+    let status = cmd.status().context("qemu run failed")?;
 
     // When the guest exits via `isa-debug-exit`, QEMU returns code 33 for our exit value (0x10).
     // Treat that as a normal exit so interactive runs don't look like failures.
@@ -378,7 +384,8 @@ fn verify() -> Result<()> {
     ensure_min_len(&bootimage, 2 * 1024 * 1024).context("failed to pad bootimage")?;
 
     let qemu = qemu_exe();
-    if !qemu.exists() {
+    // On Linux, qemu-system-x86_64 is in PATH, not a file path - skip existence check
+    if !cfg!(target_os = "linux") && !qemu.exists() {
         bail!(
             "QEMU not found at {} (edit qos-os-kernel Cargo.toml or set QEMU_EXE)",
             qemu.display()

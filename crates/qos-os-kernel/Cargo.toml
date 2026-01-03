@@ -22,8 +22,11 @@ verify = []
 fat = []  # Optional FAT16 filesystem support at /fat mount
 
 [package.metadata.bootimage]
-# Windows (winget) default install path.
-run-command = ["C:/Program Files/qemu/qemu-system-x86_64.exe", "-drive", "if=ide,index=0,media=disk,format=raw,file={}", "-serial", "stdio"]
+# QEMU command for bootimage runner
+# Linux: uses system PATH (qemu-system-x86_64) in headless mode (for Docker/CI)
+# Windows: uses installed path with GUI
+# Override with QEMU_EXE environment variable if needed
+run-command = ["qemu-system-x86_64", "-drive", "if=ide,index=0,media=disk,format=raw,file={}", "-nographic", "-serial", "mon:stdio"]
 
 [profile.dev]
 panic = "abort"
