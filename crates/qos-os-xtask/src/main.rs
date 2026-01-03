@@ -525,7 +525,16 @@ fn qemu_exe() -> PathBuf {
     if let Ok(path) = env::var("QEMU_EXE") {
         return PathBuf::from(path);
     }
-    PathBuf::from(r"C:/Program Files/qemu/qemu-system-x86_64.exe")
+    
+    // Auto-detect platform: Linux uses system PATH, Windows uses installed location
+    if cfg!(target_os = "linux") {
+        PathBuf::from("qemu-system-x86_64")
+    } else if cfg!(target_os = "windows") {
+        PathBuf::from(r"C:/Program Files/qemu/qemu-system-x86_64.exe")
+    } else {
+        // macOS, BSD, etc. - assume QEMU is in PATH
+        PathBuf::from("qemu-system-x86_64")
+    }
 }
 
 fn qemu_uefi_firmware() -> Option<PathBuf> {
@@ -542,12 +551,19 @@ fn qemu_uefi_firmware() -> Option<PathBuf> {
         return None;
     }
 
-    let p = PathBuf::from(r"C:/Program Files/qemu/share/edk2-x86_64-code.fd");
-    if p.exists() {
-        Some(p)
+    // Platform-specific UEFI firmware paths
+    let candidates = if cfg!(target_os = "linux") {
+        vec![
+            PathBuf::from("/usr/share/qemu/edk2-x86_64-code.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_CODE.fd"),
+        ]
+    } else if cfg!(target_os = "windows") {
+        vec![PathBuf::from(r"C:/Program Files/qemu/share/edk2-x86_64-code.fd")]
     } else {
-        None
-    }
+        vec![]
+    };
+
+    candidates.into_iter().find(|p| p.exists())
 }
 
 fn qemu_uefi_vars_template() -> Option<PathBuf> {
@@ -559,12 +575,19 @@ fn qemu_uefi_vars_template() -> Option<PathBuf> {
         return None;
     }
 
-    let p = PathBuf::from(r"C:/Program Files/qemu/share/edk2-i386-vars.fd");
-    if p.exists() {
-        Some(p)
+    // Platform-specific UEFI vars template paths
+    let candidates = if cfg!(target_os = "linux") {
+        vec![
+            PathBuf::from("/usr/share/qemu/edk2-i386-vars.fd"),
+            PathBuf::from("/usr/share/OVMF/OVMF_VARS.fd"),
+        ]
+    } else if cfg!(target_os = "windows") {
+        vec![PathBuf::from(r"C:/Program Files/qemu/share/edk2-i386-vars.fd")]
     } else {
-        None
-    }
+        vec![]
+    };
+
+    candidates.into_iter().find(|p| p.exists())
 }
 
 fn ensure_uefi_vars_image() -> Result<Option<PathBuf>> {
