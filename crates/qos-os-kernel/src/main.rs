@@ -19,6 +19,7 @@ mod scheduler;
 mod qemu;
 mod serial;
 mod shell;
+mod splash;     // Boot splash screen
 mod syscall;
 mod tasking;
 // mod user; // Disabled due to LLVM asm bug "offset is not a multiple of 16"
@@ -50,11 +51,11 @@ entry_point!(kernel_main);
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::init();
 
-    serial::println!("QaOS boot OK (serial)");
+    serial::println!("QOS-OS boot OK (serial)");
 
-    vga::clear_screen();
-    vga::println!("QaOS - Quantum Operating System v0.1.0");
-    vga::println!("Initializing kernel...");
+    // Show boot splash screen (skip delay in verify mode)
+    splash::show_splash();
+    splash::show_progress("Initializing memory...");
 
     let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
     unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_map) };
@@ -65,16 +66,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 
     let heap_test = alloc::boxed::Box::new(0xC0FF_EEu64);
     crate::serial_println!("heap test ok: 0x{:x}", *heap_test);
-    vga::println!("[OK] Memory & heap initialized");
 
+    splash::show_progress("Initializing CPU/GDT/IDT...");
     gdt::init();
     interrupts::init_idt();
     interrupts::init_pics();
+
+    splash::show_progress("Initializing PIT timer...");
     pit::init_timer(100);
     mouse::init();        // PS/2 Mouse with scroll wheel
 
     // Initialize production-level subsystems
-    vga::println!("[..] Detecting hardware...");
+    splash::show_progress("Detecting hardware...");
     rtc::init();          // Real-Time Clock
     pci::init();          // PCI bus enumeration
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
@@ -88,14 +91,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial_println!("System Time: {:04}-{:02}-{:02} {:02}:{:02}:{:02}",
         datetime.year, datetime.month, datetime.day,
         datetime.hour, datetime.minute, datetime.second);
-    vga::println!("[OK] Hardware initialized - {}", rtc::time_string());
-    vga::println!("");
+
+    splash::show_progress("System ready!");
+
+    // Wait for user to dismiss splash (skip in verify mode)
+    splash::wait_for_continue();
 
     #[cfg(feature = "userdemo")]
     {
         // Milestone 2 demo: enter Ring 3 and trigger `int 0x80` from user mode.
         // User module disabled due to LLVM asm bug
-        vga::println!("userdemo: user mode disabled (LLVM asm bug)");
+        serial_println!("userdemo: user mode disabled (LLVM asm bug)");
     }
 
     #[cfg(all(not(feature = "userdemo"), not(feature = "userabi")))]

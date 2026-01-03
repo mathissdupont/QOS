@@ -19,6 +19,7 @@ default = []
 userabi = []
 userdemo = ["userabi"]
 verify = []
+fat = []  # Optional FAT16 filesystem support at /fat mount
 
 [package.metadata.bootimage]
 # Windows (winget) default install path.
