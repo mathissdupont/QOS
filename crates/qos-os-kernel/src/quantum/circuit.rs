@@ -21,8 +21,16 @@ pub enum Gate {
     Z(usize),
     /// S gate (√Z)
     S(usize),
+    /// S† (S-dagger) gate
+    Sdg(usize),
     /// T gate (√S)
     T(usize),
+    /// T† (T-dagger) gate
+    Tdg(usize),
+    /// Rx rotation
+    Rx(usize, f64),
+    /// Ry rotation
+    Ry(usize, f64),
     /// Rz rotation
     Rz(usize, f64),
     /// CNOT gate (control, target)
@@ -31,6 +39,12 @@ pub enum Gate {
     Cz(usize, usize),
     /// SWAP gate
     Swap(usize, usize),
+    /// Toffoli gate (control1, control2, target)
+    Ccx(usize, usize, usize),
+    /// Identity gate
+    Id(usize),
+    /// U3 gate (general single qubit rotation)
+    U3(usize, f64, f64, f64),
     /// Measure qubit to classical bit
     Measure(usize, usize),
     /// Reset qubit to |0⟩
@@ -128,10 +142,19 @@ impl Circuit {
             Gate::Z(q) => state.apply_z(q),
             Gate::S(q) => state.apply_s(q),
             Gate::T(q) => state.apply_t(q),
+            Gate::Sdg(q) => state.apply_sdg(q),
+            Gate::Tdg(q) => state.apply_tdg(q),
+            Gate::Rx(q, theta) => state.apply_rx(q, theta),
+            Gate::Ry(q, theta) => state.apply_ry(q, theta),
             Gate::Rz(q, theta) => state.apply_rz(q, theta),
             Gate::Cx(c, t) => state.apply_cx(c, t),
             Gate::Cz(c, t) => state.apply_cz(c, t),
             Gate::Swap(a, b) => state.apply_swap(a, b),
+            Gate::Ccx(c1, c2, t) => state.apply_ccx(c1, c2, t),
+            Gate::Id(_q) => {
+                // Identity - no operation
+            }
+            Gate::U3(q, theta, phi, lambda) => state.apply_u3(q, theta, phi, lambda),
             Gate::Measure(q, _c) => {
                 state.measure_qubit(q);
             }

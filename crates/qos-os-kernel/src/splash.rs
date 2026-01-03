@@ -76,7 +76,7 @@ pub fn wait_for_continue() {
         
         // Wait for ~1 second (100 ticks at 100Hz) or until keypress
         let start_ticks = interrupts::TICKS.load(Ordering::Relaxed);
-        let timeout_ticks = 100; // 1 second at 100Hz PIT
+        let timeout_ticks = 100000; // 1 second at 100Hz PIT
         
         loop {
             // Check for keypress

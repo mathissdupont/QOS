@@ -149,6 +149,60 @@ pub struct ProcSpec {
     pub shots: u32,
 }
 
+/// Extended job options for QPU backends
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct JobOptions {
+    /// Target backend name (empty = default/local simulator)
+    pub backend: String,
+    /// Job priority (0=low, 1=normal, 2=high, 3=critical)
+    pub priority: u8,
+    /// Enable error mitigation
+    pub error_mitigation: bool,
+    /// Optimization level (0-3)
+    pub optimization_level: u8,
+    /// Timeout in milliseconds (0 = no timeout)
+    pub timeout_ms: u64,
+}
+
+/// Backend information
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackendInfo {
+    /// Backend name
+    pub name: String,
+    /// Backend type (local, ibm, google, ionq, etc.)
+    pub backend_type: String,
+    /// Maximum qubits
+    pub max_qubits: u32,
+    /// Current status
+    pub status: BackendStatus,
+    /// Is this the default backend?
+    pub is_default: bool,
+}
+
+/// Backend status
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum BackendStatus {
+    Available = 0,
+    Busy = 1,
+    Offline = 2,
+    NeedsCalibration = 3,
+    Maintenance = 4,
+}
+
+/// Extended proc spec with QPU options
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcSpecExt {
+    /// Basic spec
+    pub spec: ProcSpec,
+    /// Extended options
+    pub options: JobOptions,
+}
+
 /// Minimal result that the kernel/userland boundary can carry.
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,6 +213,22 @@ pub struct JobResult {
     pub error: Option<String>,
 }
 
+/// Extended job result with QPU metadata
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobResultExt {
+    /// Basic result
+    pub result: JobResult,
+    /// Backend that executed the job
+    pub backend_name: String,
+    /// Execution time in microseconds
+    pub execution_time_us: u64,
+    /// Number of shots actually executed
+    pub shots_executed: u32,
+    /// Calibration timestamp (if applicable)
+    pub calibration_time: Option<u64>,
+}
+
 /// Syscall-like request messages.
 ///
 /// This is intentionally small and no_std-friendly. The hosted HTTP API can be a superset.
@@ -166,12 +236,19 @@ pub struct JobResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QosRequest {
     Submit { proc: ProcSpec },
+    SubmitExt { proc: ProcSpecExt },
     Status { handle: JobHandle },
     GetResult { handle: JobHandle },
     DispatchNext,
     Cancel { handle: JobHandle },
     FinishOk { handle: JobHandle, result: JobResult },
     FinishErr { handle: JobHandle, error: String },
+    // Backend management
+    ListBackends,
+    GetBackendInfo { name: String },
+    SetDefaultBackend { name: String },
+    // Calibration (for remote QPUs)
+    FetchCalibration { backend: String },
 }
 
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -180,7 +257,11 @@ pub enum QosResponse {
     SubmitOk { handle: JobHandle, state: JobState },
     StatusOk { handle: JobHandle, state: JobState },
     ResultOk { handle: JobHandle, result: JobResult },
+    ResultExtOk { handle: JobHandle, result: JobResultExt },
     DispatchOk { dispatched: Option<JobHandle> },
+    BackendsOk { backends: Vec<BackendInfo> },
+    BackendInfoOk { info: BackendInfo },
+    CalibrationOk { backend: String, timestamp: u64 },
     Ok,
     Err { message: String },
 }

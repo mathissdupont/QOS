@@ -1,6 +1,7 @@
 extern crate alloc;
 
 use alloc::vec::Vec;
+use alloc::string::ToString;
 
 use crate::ata::{AtaPio, DriveSelect};
 
@@ -305,4 +306,30 @@ pub fn write(name: &[u8], data: &[u8]) -> Result<(), &'static str> {
         return Err("io");
     }
     Ok(())
+}
+
+/// Get list of entries in disk filesystem as (name, is_dir, size) tuples
+/// Note: diskfs is flat (no subdirectories), so dir_path is ignored
+pub fn get_entries(_dir_path: &[u8]) -> alloc::vec::Vec<(alloc::string::String, bool, usize)> {
+    let mut result = alloc::vec::Vec::new();
+    
+    let Some(sb) = read_superblock() else {
+        return result;
+    };
+    
+    let mut table = [DirEntry::empty(); MAX_FILES];
+    if !read_dir_table(&sb, &mut table) {
+        return result;
+    }
+    
+    for e in table.iter() {
+        if e.used == 0 {
+            continue;
+        }
+        let name = core::str::from_utf8(e.name_bytes()).unwrap_or("?").to_string();
+        // diskfs is flat, all entries are files
+        result.push((name, false, e.size as usize));
+    }
+    
+    result
 }

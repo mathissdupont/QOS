@@ -242,6 +242,97 @@ impl QuantumState {
         }
     }
 
+    /// Apply S† (S-dagger) gate: conjugate of S
+    pub fn apply_sdg(&mut self, target: usize) {
+        let gate = [
+            [Complex::ONE, Complex::ZERO],
+            [Complex::ZERO, Complex::new(0.0, -1.0)], // -i
+        ];
+        self.apply_single_qubit(target, gate);
+    }
+
+    /// Apply T† (T-dagger) gate: conjugate of T
+    pub fn apply_tdg(&mut self, target: usize) {
+        let s = core::f64::consts::FRAC_1_SQRT_2;
+        let gate = [
+            [Complex::ONE, Complex::ZERO],
+            [Complex::ZERO, Complex::new(s, -s)], // e^(-iπ/4)
+        ];
+        self.apply_single_qubit(target, gate);
+    }
+
+    /// Apply Rx(θ) gate: rotation around X axis
+    pub fn apply_rx(&mut self, target: usize, theta: f64) {
+        let half = theta / 2.0;
+        let cos_h = libm::cos(half);
+        let sin_h = libm::sin(half);
+        let gate = [
+            [Complex::new(cos_h, 0.0), Complex::new(0.0, -sin_h)],
+            [Complex::new(0.0, -sin_h), Complex::new(cos_h, 0.0)],
+        ];
+        self.apply_single_qubit(target, gate);
+    }
+
+    /// Apply Ry(θ) gate: rotation around Y axis
+    pub fn apply_ry(&mut self, target: usize, theta: f64) {
+        let half = theta / 2.0;
+        let cos_h = libm::cos(half);
+        let sin_h = libm::sin(half);
+        let gate = [
+            [Complex::new(cos_h, 0.0), Complex::new(-sin_h, 0.0)],
+            [Complex::new(sin_h, 0.0), Complex::new(cos_h, 0.0)],
+        ];
+        self.apply_single_qubit(target, gate);
+    }
+
+    /// Apply Toffoli (CCX) gate: flip target if both controls are |1⟩
+    pub fn apply_ccx(&mut self, control1: usize, control2: usize, target: usize) {
+        let n = self.n_qubits;
+        let dim = self.dim();
+
+        let ctrl1_bit = n - 1 - control1;
+        let ctrl2_bit = n - 1 - control2;
+        let targ_bit = n - 1 - target;
+        let ctrl1_mask = 1 << ctrl1_bit;
+        let ctrl2_mask = 1 << ctrl2_bit;
+        let targ_mask = 1 << targ_bit;
+
+        for i in 0..dim {
+            // Only process if both controls are 1 AND target is 0
+            if (i & ctrl1_mask) != 0 && (i & ctrl2_mask) != 0 && (i & targ_mask) == 0 {
+                let j = i | targ_mask;
+                self.amplitudes.swap(i, j);
+            }
+        }
+    }
+
+    /// Apply U3(θ, φ, λ) gate: general single-qubit rotation
+    pub fn apply_u3(&mut self, target: usize, theta: f64, phi: f64, lambda: f64) {
+        let cos_h = libm::cos(theta / 2.0);
+        let sin_h = libm::sin(theta / 2.0);
+        
+        let gate = [
+            [
+                Complex::new(cos_h, 0.0),
+                Complex::new(
+                    -libm::cos(lambda) * sin_h,
+                    -libm::sin(lambda) * sin_h
+                ),
+            ],
+            [
+                Complex::new(
+                    libm::cos(phi) * sin_h,
+                    libm::sin(phi) * sin_h
+                ),
+                Complex::new(
+                    libm::cos(phi + lambda) * cos_h,
+                    libm::sin(phi + lambda) * cos_h
+                ),
+            ],
+        ];
+        self.apply_single_qubit(target, gate);
+    }
+
     // ═══════════════════════════════════════════════════════════════════════════
     // MEASUREMENT
     // ═══════════════════════════════════════════════════════════════════════════

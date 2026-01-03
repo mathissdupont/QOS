@@ -1,7 +1,7 @@
 //! PS/2 Mouse driver for QaOS
 //! Supports scroll wheel for VGA buffer scrolling
 
-use core::sync::atomic::{AtomicI8, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicI8, AtomicI16, AtomicU8, Ordering};
 use spin::Mutex;
 
 use crate::arch;
@@ -15,6 +15,38 @@ static SCROLL_DELTA: AtomicI8 = AtomicI8::new(0);
 
 /// Mouse has scroll wheel
 static HAS_WHEEL: AtomicU8 = AtomicU8::new(0);
+
+/// Mouse position (in text columns/rows for VGA 80x25)
+static MOUSE_X: AtomicI16 = AtomicI16::new(40);  // Start center
+static MOUSE_Y: AtomicI16 = AtomicI16::new(12);
+
+/// Mouse button state
+static MOUSE_BUTTONS: AtomicU8 = AtomicU8::new(0);
+
+/// Click event queue
+static CLICK_EVENT: Mutex<Option<MouseClick>> = Mutex::new(None);
+
+/// Screen dimensions (text mode)
+const SCREEN_WIDTH: i16 = 80;
+const SCREEN_HEIGHT: i16 = 25;
+
+/// Mouse sensitivity divisor (pixels per text cell)
+const SENSITIVITY: i16 = 8;
+
+/// Mouse click event
+#[derive(Clone, Copy, Debug)]
+pub struct MouseClick {
+    pub x: usize,      // Column (0-79)
+    pub y: usize,      // Row (0-24)
+    pub button: MouseButton,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
 
 /// Wait for PS/2 controller input buffer to be ready
 fn wait_write() {
@@ -132,6 +164,54 @@ pub fn handle_interrupt() {
             return;
         }
         
+        let buttons = packet[0] & 0x07;
+        let old_buttons = MOUSE_BUTTONS.swap(buttons, Ordering::Relaxed);
+        
+        // Extract movement delta
+        let dx = packet[1] as i8;
+        let dy = packet[2] as i8;
+        
+        // Update position
+        let mut x = MOUSE_X.load(Ordering::Relaxed);
+        let mut y = MOUSE_Y.load(Ordering::Relaxed);
+        
+        // Scale movement (divide by sensitivity for text mode)
+        x += (dx as i16) / SENSITIVITY;
+        y -= (dy as i16) / SENSITIVITY;  // Y is inverted in PS/2
+        
+        // Clamp to screen bounds
+        x = x.clamp(0, SCREEN_WIDTH - 1);
+        y = y.clamp(0, SCREEN_HEIGHT - 1);
+        
+        MOUSE_X.store(x, Ordering::Relaxed);
+        MOUSE_Y.store(y, Ordering::Relaxed);
+        
+        // Detect button clicks (transition from not pressed to pressed)
+        if (buttons & 0x01) != 0 && (old_buttons & 0x01) == 0 {
+            // Left click
+            *CLICK_EVENT.lock() = Some(MouseClick {
+                x: x as usize,
+                y: y as usize,
+                button: MouseButton::Left,
+            });
+        }
+        if (buttons & 0x02) != 0 && (old_buttons & 0x02) == 0 {
+            // Right click
+            *CLICK_EVENT.lock() = Some(MouseClick {
+                x: x as usize,
+                y: y as usize,
+                button: MouseButton::Right,
+            });
+        }
+        if (buttons & 0x04) != 0 && (old_buttons & 0x04) == 0 {
+            // Middle click
+            *CLICK_EVENT.lock() = Some(MouseClick {
+                x: x as usize,
+                y: y as usize,
+                button: MouseButton::Middle,
+            });
+        }
+        
         // Extract scroll wheel delta from byte 3
         if has_wheel {
             let scroll = packet[3] as i8;
@@ -159,4 +239,26 @@ pub fn take_scroll_delta() -> i8 {
 /// Check if mouse has scroll wheel
 pub fn has_scroll_wheel() -> bool {
     HAS_WHEEL.load(Ordering::Relaxed) != 0
+}
+
+/// Get current mouse position (column, row)
+pub fn position() -> (usize, usize) {
+    let x = MOUSE_X.load(Ordering::Relaxed) as usize;
+    let y = MOUSE_Y.load(Ordering::Relaxed) as usize;
+    (x, y)
+}
+
+/// Get and clear click event
+pub fn take_click() -> Option<MouseClick> {
+    CLICK_EVENT.lock().take()
+}
+
+/// Check if left button is currently held
+pub fn left_held() -> bool {
+    (MOUSE_BUTTONS.load(Ordering::Relaxed) & 0x01) != 0
+}
+
+/// Check if right button is currently held  
+pub fn right_held() -> bool {
+    (MOUSE_BUTTONS.load(Ordering::Relaxed) & 0x02) != 0
 }

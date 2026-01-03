@@ -5,7 +5,10 @@ use alloc::vec::Vec;
 use x86_64::{
     PhysAddr, VirtAddr,
     registers::control::Cr3,
-    structures::paging::{FrameAllocator, OffsetPageTable, PageTable, PhysFrame, Size4KiB},
+    structures::paging::{
+        FrameAllocator, Mapper, OffsetPageTable, Page, PageTable, PageTableFlags, 
+        PhysFrame, Size4KiB,
+    },
 };
 
 pub struct MemoryContext {
@@ -152,4 +155,49 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         self.next += 1;
         frame
     }
+}
+
+/// Map a physical MMIO region to virtual address space.
+/// For simplicity, we use identity mapping (virt == phys) using physical_memory_offset.
+/// Returns the virtual address that can be used to access the MMIO region.
+pub fn map_mmio(phys_addr: u64, size: usize) -> Result<VirtAddr, &'static str> {
+    // With bootloader's physical memory offset mapping, the physical address
+    // is already accessible via phys_offset() + phys_addr
+    let virt = phys_offset() + phys_addr;
+    
+    // Ensure the pages are properly mapped with the correct flags
+    with_ctx(|mapper, frame_allocator| {
+        let start_page: Page<Size4KiB> = Page::containing_address(virt);
+        let end_page: Page<Size4KiB> = Page::containing_address(virt + size as u64 - 1);
+        
+        let mut current = start_page;
+        while current <= end_page {
+            let phys_frame = PhysFrame::containing_address(PhysAddr::new(
+                phys_addr + (current.start_address().as_u64() - start_page.start_address().as_u64())
+            ));
+            
+            // Try to map - if already mapped (via bootloader's offset mapping), this may fail
+            // but that's okay - we just need the virtual address
+            let flags = PageTableFlags::PRESENT 
+                | PageTableFlags::WRITABLE 
+                | PageTableFlags::NO_CACHE 
+                | PageTableFlags::WRITE_THROUGH;
+            
+            // The bootloader already provides complete physical memory mapping,
+            // so we don't need to create new mappings. Just verify the address is correct.
+            let _ = unsafe {
+                mapper.map_to(current, phys_frame, flags, frame_allocator)
+            };
+            
+            current += 1;
+        }
+        
+        Ok(virt)
+    })
+}
+
+/// Get the virtual address for a physical MMIO address.
+/// Uses the bootloader's physical memory offset mapping.
+pub fn mmio_virt_addr(phys_addr: u64) -> VirtAddr {
+    phys_offset() + phys_addr
 }

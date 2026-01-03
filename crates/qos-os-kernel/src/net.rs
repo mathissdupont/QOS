@@ -10,7 +10,7 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, VecDeque};
 use spin::Mutex;
 use core::sync::atomic::{AtomicU16, Ordering};
 
@@ -544,11 +544,23 @@ fn process_udp(data: &[u8], ip_hdr: &Ipv4Header) {
     
     let udp = unsafe { &*(data.as_ptr() as *const UdpHeader) };
     let src_ip = Ipv4Addr(ip_hdr.src);
+    let src_port = udp.src_port_val();
+    let dst_port = udp.dst_port_val();
+    let payload = &data[8..];
     
     crate::serial_println!(
         "[NET] UDP {}:{} -> :{} len={}",
-        src_ip, udp.src_port_val(), udp.dst_port_val(), udp.length_val()
+        src_ip, src_port, dst_port, udp.length_val()
     );
+    
+    // Check for DHCP response (from port 67 to port 68)
+    if src_port == 67 && dst_port == 68 {
+        process_dhcp(payload);
+        return;
+    }
+    
+    // Deliver to bound socket
+    udp_deliver(src_ip, src_port, dst_port, payload);
 }
 
 /// Process TCP packet
@@ -559,7 +571,11 @@ fn process_tcp(data: &[u8], ip_hdr: &Ipv4Header) {
     
     let tcp = unsafe { &*(data.as_ptr() as *const TcpHeader) };
     let src_ip = Ipv4Addr(ip_hdr.src);
+    let src_port = tcp.src_port_val();
+    let dst_port = tcp.dst_port_val();
     let flags = tcp.flags();
+    let seq = tcp.seq();
+    let ack = tcp.ack();
     
     let mut flag_str = alloc::string::String::new();
     if flags & tcp_flags::SYN != 0 { flag_str.push_str("SYN "); }
@@ -570,9 +586,20 @@ fn process_tcp(data: &[u8], ip_hdr: &Ipv4Header) {
     
     crate::serial_println!(
         "[NET] TCP {}:{} -> :{} [{}] seq={} ack={}",
-        src_ip, tcp.src_port_val(), tcp.dst_port_val(),
-        flag_str.trim(), tcp.seq(), tcp.ack()
+        src_ip, src_port, dst_port,
+        flag_str.trim(), seq, ack
     );
+    
+    // Get data offset and payload
+    let data_offset = (tcp.data_offset() as usize) * 4;
+    let payload = if data.len() > data_offset {
+        &data[data_offset..]
+    } else {
+        &[]
+    };
+    
+    // Deliver to TCP state machine
+    tcp_deliver(src_ip, src_port, dst_port, payload, flags, seq, ack);
 }
 
 /// Display network info
@@ -595,4 +622,690 @@ pub fn show_info() {
             crate::println!("  {} -> {}", ip, mac);
         }
     }
+}
+
+// =============================================================================
+// UDP SOCKET IMPLEMENTATION
+// =============================================================================
+
+/// UDP socket state
+#[derive(Debug, Clone)]
+pub struct UdpSocket {
+    pub local_port: u16,
+    pub remote_addr: Option<(Ipv4Addr, u16)>,
+}
+
+/// UDP socket handles
+static UDP_SOCKETS: Mutex<BTreeMap<u16, UdpSocket>> = Mutex::new(BTreeMap::new());
+
+/// Queue for received UDP datagrams per port
+static UDP_RX_QUEUE: Mutex<BTreeMap<u16, VecDeque<UdpDatagram>>> = Mutex::new(BTreeMap::new());
+
+/// Received UDP datagram
+#[derive(Debug, Clone)]
+pub struct UdpDatagram {
+    pub src_ip: Ipv4Addr,
+    pub src_port: u16,
+    pub data: Vec<u8>,
+}
+
+impl UdpSocket {
+    /// Create and bind a new UDP socket
+    pub fn bind(port: u16) -> Result<Self, &'static str> {
+        let mut sockets = UDP_SOCKETS.lock();
+        
+        if sockets.contains_key(&port) {
+            return Err("port already in use");
+        }
+        
+        let socket = UdpSocket {
+            local_port: port,
+            remote_addr: None,
+        };
+        
+        sockets.insert(port, socket.clone());
+        UDP_RX_QUEUE.lock().insert(port, VecDeque::new());
+        
+        crate::serial_println!("[UDP] Socket bound to port {}", port);
+        Ok(socket)
+    }
+    
+    /// Create a new UDP socket with ephemeral port
+    pub fn new() -> Self {
+        let port = alloc_port();
+        Self::bind(port).unwrap()
+    }
+    
+    /// Connect to remote address (optional, sets default destination)
+    pub fn connect(&mut self, addr: Ipv4Addr, port: u16) {
+        self.remote_addr = Some((addr, port));
+        crate::serial_println!("[UDP] Socket connected to {}:{}", addr, port);
+    }
+    
+    /// Send datagram to specified address
+    pub fn send_to(&self, data: &[u8], dst_ip: Ipv4Addr, dst_port: u16) -> Result<usize, &'static str> {
+        if !crate::e1000::is_available() {
+            return Err("network device not available");
+        }
+        
+        let packet = create_udp(dst_ip, dst_port, self.local_port, data);
+        crate::e1000::send(&packet)?;
+        
+        crate::serial_println!("[UDP] Sent {} bytes to {}:{}", data.len(), dst_ip, dst_port);
+        Ok(data.len())
+    }
+    
+    /// Send datagram to connected address
+    pub fn send(&self, data: &[u8]) -> Result<usize, &'static str> {
+        match self.remote_addr {
+            Some((ip, port)) => self.send_to(data, ip, port),
+            None => Err("socket not connected"),
+        }
+    }
+    
+    /// Receive datagram (non-blocking)
+    pub fn recv_from(&self) -> Option<UdpDatagram> {
+        // Poll for new packets first
+        crate::e1000::poll();
+        
+        // Check receive queue
+        UDP_RX_QUEUE.lock()
+            .get_mut(&self.local_port)
+            .and_then(|q| q.pop_front())
+    }
+    
+    /// Receive with timeout (simple polling with spin)
+    pub fn recv_timeout(&self, timeout_ms: u32) -> Option<UdpDatagram> {
+        let start = crate::timer::uptime_ms();
+        
+        loop {
+            if let Some(dgram) = self.recv_from() {
+                return Some(dgram);
+            }
+            
+            if crate::timer::uptime_ms() - start > timeout_ms as u64 {
+                return None;
+            }
+            
+            // Small delay
+            for _ in 0..10000 {
+                core::hint::spin_loop();
+            }
+        }
+    }
+    
+    /// Close the socket
+    pub fn close(self) {
+        UDP_SOCKETS.lock().remove(&self.local_port);
+        UDP_RX_QUEUE.lock().remove(&self.local_port);
+        crate::serial_println!("[UDP] Socket on port {} closed", self.local_port);
+    }
+}
+
+/// Deliver received UDP packet to socket
+pub fn udp_deliver(src_ip: Ipv4Addr, src_port: u16, dst_port: u16, data: &[u8]) {
+    let mut queues = UDP_RX_QUEUE.lock();
+    
+    if let Some(queue) = queues.get_mut(&dst_port) {
+        let datagram = UdpDatagram {
+            src_ip,
+            src_port,
+            data: data.to_vec(),
+        };
+        queue.push_back(datagram);
+        crate::serial_println!("[UDP] Delivered {} bytes to port {}", data.len(), dst_port);
+    }
+}
+
+/// Get list of bound UDP ports (for netstat)
+pub fn udp_ports() -> Vec<u16> {
+    UDP_SOCKETS.lock().keys().copied().collect()
+}
+
+// =============================================================================
+// TCP SOCKET IMPLEMENTATION (Basic)
+// =============================================================================
+
+/// TCP connection state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TcpState {
+    Closed,
+    Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+/// TCP socket
+#[derive(Debug, Clone)]
+pub struct TcpSocket {
+    pub local_port: u16,
+    pub remote_addr: Option<(Ipv4Addr, u16)>,
+    pub state: TcpState,
+    pub seq_num: u32,
+    pub ack_num: u32,
+}
+
+/// TCP socket handles
+static TCP_SOCKETS: Mutex<BTreeMap<u16, TcpSocket>> = Mutex::new(BTreeMap::new());
+
+/// TCP receive queue per port
+static TCP_RX_QUEUE: Mutex<BTreeMap<u16, VecDeque<Vec<u8>>>> = Mutex::new(BTreeMap::new());
+
+impl TcpSocket {
+    /// Create and bind a TCP socket (for listening)
+    pub fn bind(port: u16) -> Result<Self, &'static str> {
+        let mut sockets = TCP_SOCKETS.lock();
+        
+        if sockets.contains_key(&port) {
+            return Err("port already in use");
+        }
+        
+        let socket = TcpSocket {
+            local_port: port,
+            remote_addr: None,
+            state: TcpState::Closed,
+            seq_num: 0x1000, // Initial sequence number
+            ack_num: 0,
+        };
+        
+        sockets.insert(port, socket.clone());
+        TCP_RX_QUEUE.lock().insert(port, VecDeque::new());
+        
+        crate::serial_println!("[TCP] Socket bound to port {}", port);
+        Ok(socket)
+    }
+    
+    /// Start listening for connections
+    pub fn listen(&mut self) -> Result<(), &'static str> {
+        if self.state != TcpState::Closed {
+            return Err("socket not in closed state");
+        }
+        self.state = TcpState::Listen;
+        
+        // Update in global map
+        if let Some(sock) = TCP_SOCKETS.lock().get_mut(&self.local_port) {
+            sock.state = TcpState::Listen;
+        }
+        
+        crate::serial_println!("[TCP] Listening on port {}", self.local_port);
+        Ok(())
+    }
+    
+    /// Connect to remote host (active open)
+    pub fn connect(&mut self, dst_ip: Ipv4Addr, dst_port: u16) -> Result<(), &'static str> {
+        if !crate::e1000::is_available() {
+            return Err("network device not available");
+        }
+        
+        self.remote_addr = Some((dst_ip, dst_port));
+        self.state = TcpState::SynSent;
+        
+        // Send SYN
+        let packet = create_tcp_packet(
+            dst_ip, dst_port, self.local_port,
+            self.seq_num, 0,
+            tcp_flags::SYN,
+            &[]
+        );
+        crate::e1000::send(&packet)?;
+        
+        crate::serial_println!("[TCP] SYN sent to {}:{}", dst_ip, dst_port);
+        
+        // Update global state
+        if let Some(sock) = TCP_SOCKETS.lock().get_mut(&self.local_port) {
+            sock.state = TcpState::SynSent;
+            sock.remote_addr = Some((dst_ip, dst_port));
+        }
+        
+        Ok(())
+    }
+    
+    /// Send data on established connection
+    pub fn send(&mut self, data: &[u8]) -> Result<usize, &'static str> {
+        if self.state != TcpState::Established {
+            return Err("connection not established");
+        }
+        
+        let (dst_ip, dst_port) = self.remote_addr.ok_or("no remote address")?;
+        
+        let packet = create_tcp_packet(
+            dst_ip, dst_port, self.local_port,
+            self.seq_num, self.ack_num,
+            tcp_flags::PSH | tcp_flags::ACK,
+            data
+        );
+        
+        crate::e1000::send(&packet)?;
+        self.seq_num = self.seq_num.wrapping_add(data.len() as u32);
+        
+        crate::serial_println!("[TCP] Sent {} bytes to {}:{}", data.len(), dst_ip, dst_port);
+        Ok(data.len())
+    }
+    
+    /// Receive data (non-blocking)
+    pub fn recv(&self) -> Option<Vec<u8>> {
+        crate::e1000::poll();
+        TCP_RX_QUEUE.lock()
+            .get_mut(&self.local_port)
+            .and_then(|q| q.pop_front())
+    }
+    
+    /// Close the connection
+    pub fn close(&mut self) -> Result<(), &'static str> {
+        if self.state == TcpState::Established {
+            if let Some((dst_ip, dst_port)) = self.remote_addr {
+                let packet = create_tcp_packet(
+                    dst_ip, dst_port, self.local_port,
+                    self.seq_num, self.ack_num,
+                    tcp_flags::FIN | tcp_flags::ACK,
+                    &[]
+                );
+                let _ = crate::e1000::send(&packet);
+                self.state = TcpState::FinWait1;
+            }
+        }
+        
+        TCP_SOCKETS.lock().remove(&self.local_port);
+        TCP_RX_QUEUE.lock().remove(&self.local_port);
+        
+        crate::serial_println!("[TCP] Socket on port {} closed", self.local_port);
+        Ok(())
+    }
+}
+
+/// Get a copy of TCP socket state by port
+pub fn tcp_get_socket(port: u16) -> Option<TcpSocket> {
+    TCP_SOCKETS.lock().get(&port).cloned()
+}
+
+/// Create a TCP packet
+pub fn create_tcp_packet(
+    dst_ip: Ipv4Addr,
+    dst_port: u16,
+    src_port: u16,
+    seq: u32,
+    ack: u32,
+    flags: u16,
+    data: &[u8]
+) -> Vec<u8> {
+    let config = NET_CONFIG.lock();
+    
+    // TCP header (20 bytes minimum)
+    let data_offset = 5u8; // 5 * 4 = 20 bytes
+    let mut tcp = Vec::with_capacity(20 + data.len());
+    tcp.extend_from_slice(&src_port.to_be_bytes());
+    tcp.extend_from_slice(&dst_port.to_be_bytes());
+    tcp.extend_from_slice(&seq.to_be_bytes());
+    tcp.extend_from_slice(&ack.to_be_bytes());
+    tcp.push(data_offset << 4); // Data offset + reserved
+    tcp.push((flags & 0x3F) as u8); // Flags
+    tcp.extend_from_slice(&8192u16.to_be_bytes()); // Window size
+    tcp.extend_from_slice(&[0, 0]); // Checksum placeholder
+    tcp.extend_from_slice(&[0, 0]); // Urgent pointer
+    tcp.extend_from_slice(data);
+    
+    // TCP pseudo-header for checksum
+    let tcp_len = tcp.len() as u16;
+    let mut pseudo = Vec::new();
+    pseudo.extend_from_slice(&config.ip.0);
+    pseudo.extend_from_slice(&dst_ip.0);
+    pseudo.push(0);
+    pseudo.push(ip_proto::TCP);
+    pseudo.extend_from_slice(&tcp_len.to_be_bytes());
+    pseudo.extend_from_slice(&tcp);
+    
+    let tcp_csum = ip_checksum(&pseudo);
+    tcp[16..18].copy_from_slice(&tcp_csum.to_be_bytes());
+    
+    // IP header
+    let total_len = 20 + tcp.len();
+    let mut ip_hdr = vec![0x45, 0x00];
+    ip_hdr.extend_from_slice(&(total_len as u16).to_be_bytes());
+    ip_hdr.extend_from_slice(&[0x00, 0x00]);
+    ip_hdr.extend_from_slice(&[0x40, 0x00]);
+    ip_hdr.push(64);
+    ip_hdr.push(ip_proto::TCP);
+    ip_hdr.extend_from_slice(&[0, 0]);
+    ip_hdr.extend_from_slice(&config.ip.0);
+    ip_hdr.extend_from_slice(&dst_ip.0);
+    
+    let hdr_csum = ip_checksum(&ip_hdr);
+    ip_hdr[10..12].copy_from_slice(&hdr_csum.to_be_bytes());
+    
+    // Ethernet
+    let dst_mac = arp_lookup(dst_ip).unwrap_or(MacAddr::BROADCAST);
+    let mut packet = Vec::new();
+    packet.extend_from_slice(&dst_mac.0);
+    packet.extend_from_slice(&config.mac.0);
+    packet.extend_from_slice(&eth_type::IPV4.to_be_bytes());
+    packet.extend_from_slice(&ip_hdr);
+    packet.extend_from_slice(&tcp);
+    
+    packet
+}
+
+/// Deliver TCP data to socket
+pub fn tcp_deliver(src_ip: Ipv4Addr, src_port: u16, dst_port: u16, data: &[u8], flags: u16, seq: u32, ack: u32) {
+    let mut sockets = TCP_SOCKETS.lock();
+    
+    if let Some(sock) = sockets.get_mut(&dst_port) {
+        match sock.state {
+            TcpState::Listen if flags & tcp_flags::SYN != 0 => {
+                // Incoming connection - send SYN-ACK
+                sock.remote_addr = Some((src_ip, src_port));
+                sock.ack_num = seq.wrapping_add(1);
+                sock.state = TcpState::SynReceived;
+                
+                let packet = create_tcp_packet(
+                    src_ip, src_port, dst_port,
+                    sock.seq_num, sock.ack_num,
+                    tcp_flags::SYN | tcp_flags::ACK,
+                    &[]
+                );
+                let _ = crate::e1000::send(&packet);
+                crate::serial_println!("[TCP] SYN-ACK sent to {}:{}", src_ip, src_port);
+            }
+            TcpState::SynSent if flags & (tcp_flags::SYN | tcp_flags::ACK) != 0 => {
+                // Received SYN-ACK, send ACK
+                sock.ack_num = seq.wrapping_add(1);
+                sock.seq_num = sock.seq_num.wrapping_add(1);
+                sock.state = TcpState::Established;
+                
+                let packet = create_tcp_packet(
+                    src_ip, src_port, dst_port,
+                    sock.seq_num, sock.ack_num,
+                    tcp_flags::ACK,
+                    &[]
+                );
+                let _ = crate::e1000::send(&packet);
+                crate::serial_println!("[TCP] Connection established to {}:{}", src_ip, src_port);
+            }
+            TcpState::SynReceived if flags & tcp_flags::ACK != 0 => {
+                sock.state = TcpState::Established;
+                crate::serial_println!("[TCP] Connection established from {}:{}", src_ip, src_port);
+            }
+            TcpState::Established => {
+                if flags & tcp_flags::FIN != 0 {
+                    // Peer wants to close
+                    sock.ack_num = seq.wrapping_add(1);
+                    sock.state = TcpState::CloseWait;
+                    
+                    let packet = create_tcp_packet(
+                        src_ip, src_port, dst_port,
+                        sock.seq_num, sock.ack_num,
+                        tcp_flags::ACK,
+                        &[]
+                    );
+                    let _ = crate::e1000::send(&packet);
+                } else if !data.is_empty() {
+                    // Data received
+                    sock.ack_num = seq.wrapping_add(data.len() as u32);
+                    
+                    // Send ACK
+                    let packet = create_tcp_packet(
+                        src_ip, src_port, dst_port,
+                        sock.seq_num, sock.ack_num,
+                        tcp_flags::ACK,
+                        &[]
+                    );
+                    let _ = crate::e1000::send(&packet);
+                    
+                    // Deliver to receive queue
+                    drop(sockets);
+                    if let Some(queue) = TCP_RX_QUEUE.lock().get_mut(&dst_port) {
+                        queue.push_back(data.to_vec());
+                    }
+                    crate::serial_println!("[TCP] Received {} bytes on port {}", data.len(), dst_port);
+                    return;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Get list of TCP sockets (for netstat)
+pub fn tcp_sockets() -> Vec<(u16, TcpState, Option<(Ipv4Addr, u16)>)> {
+    TCP_SOCKETS.lock()
+        .iter()
+        .map(|(port, sock)| (*port, sock.state, sock.remote_addr))
+        .collect()
+}
+
+// =============================================================================
+// DHCP CLIENT
+// =============================================================================
+
+/// DHCP message types
+mod dhcp_msg {
+    pub const DISCOVER: u8 = 1;
+    pub const OFFER: u8 = 2;
+    pub const REQUEST: u8 = 3;
+    pub const ACK: u8 = 5;
+}
+
+/// DHCP options
+mod dhcp_opt {
+    pub const SUBNET_MASK: u8 = 1;
+    pub const ROUTER: u8 = 3;
+    pub const DNS: u8 = 6;
+    pub const REQUESTED_IP: u8 = 50;
+    pub const MESSAGE_TYPE: u8 = 53;
+    pub const SERVER_ID: u8 = 54;
+    pub const END: u8 = 255;
+}
+
+/// DHCP transaction ID
+static DHCP_XID: AtomicU32 = AtomicU32::new(0x12345678);
+
+use core::sync::atomic::AtomicU32;
+
+/// Create DHCP Discover packet
+pub fn create_dhcp_discover() -> Vec<u8> {
+    let config = NET_CONFIG.lock();
+    let xid = DHCP_XID.load(Ordering::SeqCst);
+    
+    let mut dhcp = vec![0u8; 240];
+    dhcp[0] = 1;  // BOOTREQUEST
+    dhcp[1] = 1;  // Ethernet
+    dhcp[2] = 6;  // Hardware addr len
+    dhcp[3] = 0;  // Hops
+    dhcp[4..8].copy_from_slice(&xid.to_be_bytes());  // Transaction ID
+    dhcp[8..10].copy_from_slice(&0u16.to_be_bytes()); // Seconds
+    dhcp[10..12].copy_from_slice(&0x8000u16.to_be_bytes()); // Flags (broadcast)
+    // Client IP, Your IP, Server IP, Gateway IP = 0
+    dhcp[28..34].copy_from_slice(&config.mac.0); // Client MAC
+    
+    // Magic cookie
+    dhcp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    
+    // DHCP options
+    dhcp.push(dhcp_opt::MESSAGE_TYPE);
+    dhcp.push(1);
+    dhcp.push(dhcp_msg::DISCOVER);
+    
+    dhcp.push(dhcp_opt::END);
+    
+    // Pad to minimum size
+    while dhcp.len() < 300 {
+        dhcp.push(0);
+    }
+    
+    // Wrap in UDP (src 68, dst 67)
+    create_udp(Ipv4Addr::BROADCAST, 67, 68, &dhcp)
+}
+
+/// Create DHCP Request packet
+pub fn create_dhcp_request(offered_ip: Ipv4Addr, server_ip: Ipv4Addr) -> Vec<u8> {
+    let config = NET_CONFIG.lock();
+    let xid = DHCP_XID.load(Ordering::SeqCst);
+    
+    let mut dhcp = vec![0u8; 240];
+    dhcp[0] = 1;  // BOOTREQUEST
+    dhcp[1] = 1;  // Ethernet
+    dhcp[2] = 6;  // Hardware addr len
+    dhcp[3] = 0;  // Hops
+    dhcp[4..8].copy_from_slice(&xid.to_be_bytes());
+    dhcp[8..10].copy_from_slice(&0u16.to_be_bytes());
+    dhcp[10..12].copy_from_slice(&0x8000u16.to_be_bytes());
+    dhcp[28..34].copy_from_slice(&config.mac.0);
+    
+    // Magic cookie
+    dhcp[236..240].copy_from_slice(&[99, 130, 83, 99]);
+    
+    // DHCP options
+    dhcp.push(dhcp_opt::MESSAGE_TYPE);
+    dhcp.push(1);
+    dhcp.push(dhcp_msg::REQUEST);
+    
+    dhcp.push(dhcp_opt::REQUESTED_IP);
+    dhcp.push(4);
+    dhcp.extend_from_slice(&offered_ip.0);
+    
+    dhcp.push(dhcp_opt::SERVER_ID);
+    dhcp.push(4);
+    dhcp.extend_from_slice(&server_ip.0);
+    
+    dhcp.push(dhcp_opt::END);
+    
+    while dhcp.len() < 300 {
+        dhcp.push(0);
+    }
+    
+    create_udp(Ipv4Addr::BROADCAST, 67, 68, &dhcp)
+}
+
+/// DHCP client state
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DhcpState {
+    Init,
+    Selecting,
+    Requesting,
+    Bound,
+}
+
+static DHCP_STATE: Mutex<DhcpState> = Mutex::new(DhcpState::Init);
+static DHCP_OFFERED_IP: Mutex<Option<Ipv4Addr>> = Mutex::new(None);
+static DHCP_SERVER_IP: Mutex<Option<Ipv4Addr>> = Mutex::new(None);
+
+/// Start DHCP discovery
+pub fn dhcp_discover() -> Result<(), &'static str> {
+    if !crate::e1000::is_available() {
+        return Err("network device not available");
+    }
+    
+    // Generate new transaction ID
+    let xid = crate::rtc::unix_time() as u32;
+    DHCP_XID.store(xid, Ordering::SeqCst);
+    
+    *DHCP_STATE.lock() = DhcpState::Selecting;
+    
+    let packet = create_dhcp_discover();
+    crate::e1000::send(&packet)?;
+    
+    crate::serial_println!("[DHCP] DISCOVER sent (xid={:08x})", xid);
+    Ok(())
+}
+
+/// Process DHCP response (called from UDP processing)
+pub fn process_dhcp(data: &[u8]) {
+    if data.len() < 240 {
+        return;
+    }
+    
+    // Check magic cookie
+    if &data[236..240] != &[99, 130, 83, 99] {
+        return;
+    }
+    
+    // Check transaction ID
+    let xid = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+    if xid != DHCP_XID.load(Ordering::SeqCst) {
+        return;
+    }
+    
+    let your_ip = Ipv4Addr([data[16], data[17], data[18], data[19]]);
+    let server_ip = Ipv4Addr([data[20], data[21], data[22], data[23]]);
+    
+    // Parse options
+    let mut i = 240;
+    let mut msg_type = 0u8;
+    let mut subnet = Ipv4Addr::ZERO;
+    let mut router = Ipv4Addr::ZERO;
+    let mut dns = Ipv4Addr::ZERO;
+    
+    while i < data.len() && data[i] != dhcp_opt::END {
+        if data[i] == 0 {
+            i += 1;
+            continue;
+        }
+        
+        let opt = data[i];
+        let len = data.get(i + 1).copied().unwrap_or(0) as usize;
+        let val = &data[i + 2..i + 2 + len.min(data.len() - i - 2)];
+        
+        match opt {
+            dhcp_opt::MESSAGE_TYPE if len >= 1 => msg_type = val[0],
+            dhcp_opt::SUBNET_MASK if len >= 4 => subnet = Ipv4Addr([val[0], val[1], val[2], val[3]]),
+            dhcp_opt::ROUTER if len >= 4 => router = Ipv4Addr([val[0], val[1], val[2], val[3]]),
+            dhcp_opt::DNS if len >= 4 => dns = Ipv4Addr([val[0], val[1], val[2], val[3]]),
+            _ => {}
+        }
+        
+        i += 2 + len;
+    }
+    
+    let state = *DHCP_STATE.lock();
+    
+    match (state, msg_type) {
+        (DhcpState::Selecting, dhcp_msg::OFFER) => {
+            crate::serial_println!("[DHCP] OFFER received: IP={}", your_ip);
+            *DHCP_OFFERED_IP.lock() = Some(your_ip);
+            *DHCP_SERVER_IP.lock() = Some(server_ip);
+            *DHCP_STATE.lock() = DhcpState::Requesting;
+            
+            // Send REQUEST
+            let packet = create_dhcp_request(your_ip, server_ip);
+            let _ = crate::e1000::send(&packet);
+            crate::serial_println!("[DHCP] REQUEST sent for {}", your_ip);
+        }
+        (DhcpState::Requesting, dhcp_msg::ACK) => {
+            crate::serial_println!("[DHCP] ACK received - IP assigned: {}", your_ip);
+            
+            // Configure network
+            {
+                let mut config = NET_CONFIG.lock();
+                config.ip = your_ip;
+                if subnet != Ipv4Addr::ZERO {
+                    config.netmask = subnet;
+                }
+                if router != Ipv4Addr::ZERO {
+                    config.gateway = router;
+                }
+                if dns != Ipv4Addr::ZERO {
+                    config.dns = dns;
+                }
+            }
+            
+            *DHCP_STATE.lock() = DhcpState::Bound;
+            crate::println!("[DHCP] Network configured:");
+            crate::println!("  IP:      {}", your_ip);
+            crate::println!("  Netmask: {}", subnet);
+            crate::println!("  Gateway: {}", router);
+            crate::println!("  DNS:     {}", dns);
+        }
+        _ => {}
+    }
+}
+
+/// Get DHCP state
+pub fn dhcp_state() -> DhcpState {
+    *DHCP_STATE.lock()
 }

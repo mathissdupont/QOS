@@ -40,9 +40,14 @@ mod fat16;      // FAT16 file system
 mod ahci;       // SATA AHCI driver
 mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
+mod e1000;      // Intel E1000 NIC driver
+mod http;       // HTTP/HTTPS client
 mod gui;        // Window manager & GUI
 mod timer;      // Timer utilities
 mod mouse;      // PS/2 Mouse driver
+mod menu;       // Text-mode menu system
+mod dialog;     // Dialog boxes
+mod explorer;   // File explorer
 
 use bootloader::{entry_point, BootInfo};
 
@@ -83,8 +88,18 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
     // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
     syscall_ext::init();  // Extended syscalls
-    // net::init();       // Network stack - disabled (needs working hw)
+    
+    // Initialize network
+    splash::show_progress("Initializing network...");
+    if let Err(e) = e1000::init() {
+        serial_println!("[NET] E1000 init skipped: {}", e);
+    }
+    
     gui::init();          // Window manager
+    
+    // Initialize menu system
+    let menu_bar = menu::create_default_menu();
+    menu::init(menu_bar);
     
     // Show system info
     let datetime = rtc::read_datetime();

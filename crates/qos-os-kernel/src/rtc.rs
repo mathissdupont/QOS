@@ -226,6 +226,11 @@ pub fn unix_time() -> u64 {
     read_datetime().to_unix()
 }
 
+/// Alias for unix_time - used by fs module
+pub fn unix_timestamp() -> u64 {
+    unix_time()
+}
+
 /// Get system uptime in seconds (using PIT ticks)
 pub fn uptime_seconds() -> u64 {
     let ticks = crate::interrupts::TICKS.load(Ordering::Relaxed);

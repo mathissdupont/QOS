@@ -1,5 +1,8 @@
+extern crate alloc;
+use alloc::vec::Vec;
+
 use core::fmt;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use lazy_static::lazy_static;
 use spin::Mutex;
@@ -435,6 +438,22 @@ pub fn write_at(row: usize, col: usize, s: &str, fg: Color, bg: Color) {
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
 
+    // Check if we're in capture mode
+    if CAPTURE_ACTIVE.load(Ordering::Relaxed) {
+        // Capture mode - write to buffer only
+        let mut buf = CAPTURE_BUFFER.lock();
+        struct Sink<'a>(&'a mut Vec<u8>);
+        impl<'a> fmt::Write for Sink<'a> {
+            fn write_str(&mut self, s: &str) -> fmt::Result {
+                self.0.extend_from_slice(s.as_bytes());
+                Ok(())
+            }
+        }
+        let mut sink = Sink(&mut buf);
+        sink.write_fmt(args).ok();
+        return;
+    }
+
     // 1) Always update the real VGA writer.
     {
         let mut w = WRITER.lock();
@@ -483,3 +502,30 @@ macro_rules! println {
 }
 
 pub use crate::println;
+
+// ==================== OUTPUT CAPTURE FOR PIPES ====================
+
+static CAPTURE_ACTIVE: AtomicBool = AtomicBool::new(false);
+lazy_static! {
+    static ref CAPTURE_BUFFER: Mutex<Vec<u8>> = Mutex::new(Vec::new());
+}
+
+/// Start capturing output instead of printing to VGA
+pub fn start_capture() {
+    CAPTURE_BUFFER.lock().clear();
+    CAPTURE_ACTIVE.store(true, Ordering::Relaxed);
+}
+
+/// Stop capturing and return the captured output
+pub fn stop_capture() -> Vec<u8> {
+    CAPTURE_ACTIVE.store(false, Ordering::Relaxed);
+    let mut buf = CAPTURE_BUFFER.lock();
+    let result = buf.clone();
+    buf.clear();
+    result
+}
+
+/// Check if capture mode is active
+pub fn is_capturing() -> bool {
+    CAPTURE_ACTIVE.load(Ordering::Relaxed)
+}
