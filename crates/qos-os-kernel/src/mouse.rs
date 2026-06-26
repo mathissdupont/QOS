@@ -141,8 +141,17 @@ pub fn init() {
 /// Called from IRQ12 handler
 pub fn handle_interrupt() {
     let data = unsafe { arch::inb(0x60) };
-    
+
     let byte_num = PACKET_BYTE.load(Ordering::Relaxed);
+
+    // PS/2 packet sync: byte 0 of every packet has bit 3 (0x08) set. If we are expecting the
+    // first byte and it does NOT have bit 3 set, we are desynchronised (a byte was dropped) —
+    // discard this byte to realign instead of building a garbage packet. Without this, motion
+    // looks erratic or dead once sync is lost.
+    if byte_num == 0 && (data & 0x08) == 0 {
+        return;
+    }
+
     let has_wheel = HAS_WHEEL.load(Ordering::Relaxed) != 0;
     let packet_size = if has_wheel { 4 } else { 3 };
     
@@ -211,11 +220,39 @@ pub fn handle_interrupt() {
                 button: MouseButton::Middle,
             });
         }
-        
+
+        // Feed the unified input event queue (Phase 0.1) with raw movement + button edges.
+        if dx != 0 || dy != 0 {
+            crate::input::push(crate::input::InputEvent::MouseMove {
+                dx: dx as i16,
+                dy: dy as i16,
+            });
+        }
+        let changed = buttons ^ old_buttons;
+        if changed & 0x01 != 0 {
+            crate::input::push(crate::input::InputEvent::MouseButton {
+                button: MouseButton::Left,
+                pressed: buttons & 0x01 != 0,
+            });
+        }
+        if changed & 0x02 != 0 {
+            crate::input::push(crate::input::InputEvent::MouseButton {
+                button: MouseButton::Right,
+                pressed: buttons & 0x02 != 0,
+            });
+        }
+        if changed & 0x04 != 0 {
+            crate::input::push(crate::input::InputEvent::MouseButton {
+                button: MouseButton::Middle,
+                pressed: buttons & 0x04 != 0,
+            });
+        }
+
         // Extract scroll wheel delta from byte 3
         if has_wheel {
             let scroll = packet[3] as i8;
             if scroll != 0 {
+                crate::input::push(crate::input::InputEvent::MouseScroll { delta: scroll });
                 // Scroll: positive = scroll up, negative = scroll down
                 let delta = -scroll; // Invert for natural scrolling
                 SCROLL_DELTA.store(delta, Ordering::Relaxed);

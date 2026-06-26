@@ -1,14 +1,24 @@
-use std::collections::VecDeque;
-use uuid::Uuid;
+//! Scheduler strategy (the "run queue").
+//!
+//! A trait so different policies can be plugged in later (priority, deadline, qubit-aware
+//! placement per ADR-0006) without touching the manager.
+
+use alloc::collections::VecDeque;
+use qos_abi::JobHandle;
 
 pub trait Scheduler: Send + Sync {
-    fn enqueue(&mut self, job_id: Uuid);
-    fn select_next(&mut self) -> Option<Uuid>;
+    fn enqueue(&mut self, job: JobHandle);
+    fn select_next(&mut self) -> Option<JobHandle>;
     fn len(&self) -> usize;
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
+/// First-in-first-out scheduler.
+#[derive(Default)]
 pub struct FifoScheduler {
-    q: VecDeque<Uuid>,
+    q: VecDeque<JobHandle>,
 }
 
 impl FifoScheduler {
@@ -18,11 +28,11 @@ impl FifoScheduler {
 }
 
 impl Scheduler for FifoScheduler {
-    fn enqueue(&mut self, job_id: Uuid) {
-        self.q.push_back(job_id);
+    fn enqueue(&mut self, job: JobHandle) {
+        self.q.push_back(job);
     }
 
-    fn select_next(&mut self) -> Option<Uuid> {
+    fn select_next(&mut self) -> Option<JobHandle> {
         self.q.pop_front()
     }
 

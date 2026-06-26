@@ -1,75 +1,66 @@
+//! In-memory job + result store (the "process table").
+
+use alloc::collections::BTreeMap;
+use alloc::vec::Vec;
+
+use crate::error::CoreError;
 use crate::job::QJob;
 use crate::result::QResult;
-use std::collections::HashMap;
-use uuid::Uuid;
+use qos_abi::JobHandle;
 
-use thiserror::Error;
-
-#[derive(Debug, Error)]
-pub enum CoreError {
-    #[error("job not found: {0}")]
-    JobNotFound(Uuid),
-
-    #[error("invalid state transition for job: {0}")]
-    InvalidState(Uuid),
-
-    #[error("result not found for job: {0}")]
-    ResultNotFound(Uuid),
-
-    #[error("io error: {0}")]
-    Io(String),
-
-    #[error("serde error: {0}")]
-    Serde(String),
-}
-
+#[derive(Default)]
 pub struct JobStore {
-    jobs: HashMap<Uuid, QJob>,
-    results: HashMap<Uuid, QResult>,
+    jobs: BTreeMap<u64, QJob>,
+    results: BTreeMap<u64, QResult>,
 }
 
 impl JobStore {
     pub fn new() -> Self {
         Self {
-            jobs: HashMap::new(),
-            results: HashMap::new(),
+            jobs: BTreeMap::new(),
+            results: BTreeMap::new(),
         }
     }
 
     pub fn insert(&mut self, job: QJob) {
-        self.jobs.insert(job.id, job);
+        self.jobs.insert(job.id.0, job);
     }
 
-    pub fn get(&self, id: Uuid) -> Result<&QJob, CoreError> {
-        self.jobs.get(&id).ok_or(CoreError::JobNotFound(id))
+    /// Insert or replace a job (used by journal recovery).
+    pub fn upsert_job(&mut self, job: QJob) {
+        self.jobs.insert(job.id.0, job);
     }
 
-    pub fn get_mut(&mut self, id: Uuid) -> Result<&mut QJob, CoreError> {
-        self.jobs.get_mut(&id).ok_or(CoreError::JobNotFound(id))
+    pub fn get(&self, id: JobHandle) -> Result<&QJob, CoreError> {
+        self.jobs.get(&id.0).ok_or(CoreError::JobNotFound(id))
     }
 
-    pub fn put_result(&mut self, id: Uuid, res: QResult) {
-        self.results.insert(id, res);
+    pub fn get_mut(&mut self, id: JobHandle) -> Result<&mut QJob, CoreError> {
+        self.jobs.get_mut(&id.0).ok_or(CoreError::JobNotFound(id))
     }
 
-    pub fn get_result(&self, id: Uuid) -> Result<&QResult, CoreError> {
-        self.results.get(&id).ok_or(CoreError::ResultNotFound(id))
+    pub fn put_result(&mut self, id: JobHandle, res: QResult) {
+        self.results.insert(id.0, res);
     }
 
-    pub fn list_ids(&self) -> Vec<Uuid> {
-        self.jobs.keys().cloned().collect()
+    pub fn get_result(&self, id: JobHandle) -> Result<&QResult, CoreError> {
+        self.results.get(&id.0).ok_or(CoreError::ResultNotFound(id))
+    }
+
+    pub fn list_ids(&self) -> Vec<JobHandle> {
+        self.jobs.keys().map(|&k| JobHandle(k)).collect()
     }
 
     pub fn len(&self) -> usize {
         self.jobs.len()
     }
-    
+
+    pub fn is_empty(&self) -> bool {
+        self.jobs.is_empty()
+    }
+
     pub fn clear(&mut self) {
         self.jobs.clear();
         self.results.clear();
-    }
-
-    pub fn upsert_job(&mut self, job: QJob) {
-        self.jobs.insert(job.id, job);
     }
 }

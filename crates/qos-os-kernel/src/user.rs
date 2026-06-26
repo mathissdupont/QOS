@@ -172,7 +172,19 @@ const USER_N_QUBITS: u32 = 2;
 const SUBMIT_HDR_LEN: usize = core::mem::size_of::<qos_abi::shm::ShmSubmitIrHeader>();
 const SUBMIT_TOTAL_LEN: usize = SUBMIT_HDR_LEN + USER_QASM2_BELL.len();
 
-// x86_64 user program:
+// MINIMAL TEST: Set ABI version and call exit syscall
+const USER_PROG_SIMPLE: &[u8] = &[
+    // mov dword ptr [0x40010000], 1  ; abi_version = 1
+    0xC7, 0x04, 0x25, 0x00, 0x00, 0x01, 0x40, 0x01, 0x00, 0x00, 0x00,
+    // mov dword ptr [0x40010004], 4  ; op=Exit (syscall 4)
+    0xC7, 0x04, 0x25, 0x04, 0x00, 0x01, 0x40, 0x04, 0x00, 0x00, 0x00,
+    // int 0x80
+    0xCD, 0x80,
+    // hlt (should never reach)
+    0xF4,
+];
+
+// x86_64 user program (FULL VERSION - DISABLED FOR NOW):
 //   ; SubmitIr(QASM2)
 //   mov qword ptr [CALL.arg0], SUBMITBUF_PTR
 //   mov qword ptr [CALL.arg1], SUBMITBUF_TOTAL
@@ -193,8 +205,8 @@ const SUBMIT_TOTAL_LEN: usize = SUBMIT_HDR_LEN + USER_QASM2_BELL.len();
 //   mov dword ptr [CALL.op], 2
 //   int 0x80
 //   mov rax, qword ptr [CALL.ret0]
-//   cmp eax, 2
-//   jne .L1
+//   cmp eax, 3                             ; Done=3?
+//   jne .L1                                ; loop until Done
 //
 //   ; GetResult(handle1)
 //   mov qword ptr [CALL.arg0], rbx
@@ -207,8 +219,8 @@ const SUBMIT_TOTAL_LEN: usize = SUBMIT_HDR_LEN + USER_QASM2_BELL.len();
 //   mov dword ptr [CALL.op], 2
 //   int 0x80
 //   mov rax, qword ptr [CALL.ret0]
-//   cmp eax, 2
-//   jne .L2
+//   cmp eax, 3                             ; Done=3?
+//   jne .L2                                ; loop until Done
 //
 //   ; GetResult(handle2)
 //   mov qword ptr [CALL.arg0], rcx
@@ -257,9 +269,9 @@ const USER_PROG: &[u8] = &[
     0xCD, 0x80,
     // mov rax, qword ptr [0x40010010]      ; ret0=state
     0x48, 0x8B, 0x04, 0x25, 0x10, 0x00, 0x01, 0x40,
-    // cmp eax, 2                           ; Done?
-    0x83, 0xF8, 0x02,
-    // jne .L1
+    // cmp eax, 3                           ; Done=3?
+    0x83, 0xF8, 0x03,
+    // jne .L1                              ; loop if not Done
     0x75, 0xDE,
     // mov qword ptr [0x40010020], rbx      ; arg0=handle
     0x48, 0x89, 0x1C, 0x25, 0x20, 0x00, 0x01, 0x40,
@@ -277,9 +289,9 @@ const USER_PROG: &[u8] = &[
     0xCD, 0x80,
     // mov rax, qword ptr [0x40010010]      ; ret0=state
     0x48, 0x8B, 0x04, 0x25, 0x10, 0x00, 0x01, 0x40,
-    // cmp eax, 2                           ; Done?
-    0x83, 0xF8, 0x02,
-    // jne .L2
+    // cmp eax, 3                           ; Done=3?
+    0x83, 0xF8, 0x03,
+    // jne .L2                              ; loop if not Done
     0x75, 0xDE,
 
     // mov qword ptr [0x40010020], rcx      ; arg0=handle2
@@ -298,9 +310,8 @@ const USER_PROG: &[u8] = &[
 ];
 
 pub fn enter_user_mode(frame_allocator: &mut memory::BootInfoFrameAllocator) -> ! {
-    vga::println!("entering user mode...");
-    serial::println!("entering user mode...");
-
+    serial::println!("[USER] Starting user-mode quantum program...");
+    
     // Create a fresh user address space (shares kernel mappings).
     let (user_cr3, mut user_mapper) = memory::create_user_pagetable(frame_allocator);
 
@@ -340,8 +351,9 @@ pub fn enter_user_mode(frame_allocator: &mut memory::BootInfoFrameAllocator) -> 
     }
 
     unsafe {
-        // Copy code into the mapped user page.
+        // Copy quantum program into the mapped user page.
         let dst: *mut u8 = VirtAddr::new(USER_CODE_START).as_mut_ptr();
+        serial::println!("[USER] Loading quantum program ({} bytes)", USER_PROG.len());
         core::ptr::copy_nonoverlapping(USER_PROG.as_ptr(), dst, USER_PROG.len());
     }
 
@@ -364,6 +376,160 @@ pub fn exec_userdemo() -> ! {
 /// transfers control to its entrypoint. It does not return.
 pub fn exec_elf(bytes: &[u8]) -> ! {
     memory::with_ctx(|_mapper, frame_allocator| enter_user_mode_elf(frame_allocator, bytes))
+}
+
+// ── Ring-3 preemption test (Phase 2.1b) ───────────────────────────────────────────────────
+
+/// A Ring-3 process prepared for the preemptive scheduler. The fields are exactly what
+/// `kthread::adopt_user` needs.
+pub struct Ring3Handle {
+    /// Saved kernel stack pointer pointing at a frame that `iretq`s into Ring 3.
+    pub saved_rsp: u64,
+    pub cr3: PhysFrame<Size4KiB>,
+    /// Kernel stack top → TSS.RSP0 while this process runs.
+    pub rsp0_top: VirtAddr,
+}
+
+/// Minimal Ring-3 payload: `jmp $` (spin forever). A runaway program with no syscalls and no
+/// cooperative yield — the perfect stress test for preemption: if the OS stays responsive
+/// while this runs, the timer is genuinely preempting Ring 3.
+const SPIN_PROG: &[u8] = &[0xEB, 0xFE];
+
+/// Ring-3 payload that runs a bounded busy loop, then dereferences address 0 (unmapped in its
+/// address space) to trigger a page fault — a "crashing" program. Used to prove fault
+/// isolation: the kernel kills only this process and keeps running.
+#[rustfmt::skip]
+const FAULT_PROG: &[u8] = &[
+    0x48, 0xC7, 0xC1, 0x00, 0x00, 0x00, 0x01, // mov rcx, 0x01000000
+    0x48, 0xFF, 0xC9,                         // dec rcx
+    0x75, 0xFB,                               // jnz -5 (loop)
+    0x8A, 0x04, 0x25, 0x00, 0x00, 0x00, 0x00, // mov al, byte ptr [0]  -> page fault
+    0xEB, 0xFE,                               // jmp $ (unreached)
+];
+
+/// Ring-3 payload that busy-loops then voluntarily exits via the OP_EXIT syscall
+/// (`int 0x80` with op=4 in the shared ABI page). Proves clean process teardown.
+#[rustfmt::skip]
+const EXIT_PROG: &[u8] = &[
+    0x48, 0xC7, 0xC1, 0x00, 0x00, 0x80, 0x00, // mov rcx, 0x00800000
+    0x48, 0xFF, 0xC9,                         // dec rcx
+    0x75, 0xFB,                               // jnz -5 (loop)
+    // mov dword ptr [0x40010000], 1          ; abi_version (must match kernel)
+    0xC7, 0x04, 0x25, 0x00, 0x00, 0x01, 0x40, 0x01, 0x00, 0x00, 0x00,
+    // mov dword ptr [0x40010004], 4          ; op = OP_EXIT
+    0xC7, 0x04, 0x25, 0x04, 0x00, 0x01, 0x40, 0x04, 0x00, 0x00, 0x00,
+    0xCD, 0x80,                               // int 0x80
+    0xEB, 0xFE,                               // jmp $ (unreached)
+];
+
+/// Kernel stacks for test Ring-3 processes, kept alive for the duration of the test.
+static TEST_KSTACKS: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+/// Free the kernel stacks held for the Ring-3 preemption test. Call once the test is over.
+pub fn clear_ring3_test_stacks() {
+    TEST_KSTACKS.lock().clear();
+}
+
+/// Build a Ring-3 spinner process (infinite loop). Used by `proctest`.
+pub fn spawn_ring3_spinner() -> Ring3Handle {
+    spawn_ring3(SPIN_PROG)
+}
+
+/// Build a Ring-3 process that busy-loops then page-faults. Used by `faulttest` to prove the
+/// kernel isolates and survives a crashing user process.
+pub fn spawn_ring3_faulter() -> Ring3Handle {
+    spawn_ring3(FAULT_PROG)
+}
+
+/// Build a Ring-3 process that busy-loops then exits cleanly via OP_EXIT. Used by `exittest`.
+pub fn spawn_ring3_exiter() -> Ring3Handle {
+    spawn_ring3(EXIT_PROG)
+}
+
+/// Build a Ring-3 process that uses the register-based syscall ABI (int 0x81): it calls
+/// SYS_WRITE to print a message, then SYS_EXIT. Used by `regabitest` (Phase 2.2). The program
+/// is assembled at runtime because the message address depends on the code length.
+pub fn spawn_ring3_regabi() -> Ring3Handle {
+    let msg: &[u8] = b"hello from ring3 via register syscall ABI (int 0x81)\n";
+    // Fixed-size prologue; the message bytes follow it in the same code page.
+    const PROLOGUE_LEN: u64 = 26;
+    let str_addr = (USER_CODE_START + PROLOGUE_LEN) as u32;
+
+    let mut prog: Vec<u8> = Vec::with_capacity(PROLOGUE_LEN as usize + msg.len());
+    prog.push(0xBF); // mov edi, imm32  (rdi = message ptr, zero-extended)
+    prog.extend_from_slice(&str_addr.to_le_bytes());
+    prog.push(0xBE); // mov esi, imm32  (rsi = length)
+    prog.extend_from_slice(&(msg.len() as u32).to_le_bytes());
+    prog.push(0xB8); // mov eax, imm32  (rax = SYS_WRITE = 1)
+    prog.extend_from_slice(&1u32.to_le_bytes());
+    prog.extend_from_slice(&[0xCD, 0x81]); // int 0x81
+    prog.push(0xB8); // mov eax, imm32  (rax = SYS_EXIT = 0)
+    prog.extend_from_slice(&0u32.to_le_bytes());
+    prog.extend_from_slice(&[0xCD, 0x81]); // int 0x81
+    prog.extend_from_slice(&[0xEB, 0xFE]); // jmp $ (unreached)
+    debug_assert_eq!(prog.len() as u64, PROLOGUE_LEN);
+    prog.extend_from_slice(msg);
+
+    spawn_ring3(&prog)
+}
+
+/// Build a Ring-3 process running `payload` in its own address space, ready to hand to the
+/// preemptive scheduler (Phase 2.1b).
+fn spawn_ring3(payload: &[u8]) -> Ring3Handle {
+    memory::with_ctx(|_mapper, fa| {
+        // Fresh address space (shares kernel mappings; P4[0] is the private user region).
+        let (cr3, mut um) = memory::create_user_pagetable(fa);
+        map_vga_identity(&mut um, fa);
+
+        let code_page = Page::containing_address(VirtAddr::new(USER_CODE_START));
+        let stack_page = Page::containing_address(VirtAddr::new(USER_STACK_START));
+        let abi_page = Page::containing_address(VirtAddr::new(USER_ABI_CALL_START));
+        map_user_page(&mut um, fa, code_page, false); // executable code
+        map_user_page(&mut um, fa, stack_page, true); // NX data stack
+        map_user_page(&mut um, fa, abi_page, true); // shared syscall ABI page (NX)
+
+        // Copy the payload into the code page. It is only mapped in the new CR3, so switch
+        // there to write, then return to the kernel CR3.
+        let saved = memory::switch_cr3(cr3);
+        unsafe {
+            let dst: *mut u8 = VirtAddr::new(USER_CODE_START).as_mut_ptr();
+            core::ptr::copy_nonoverlapping(payload.as_ptr(), dst, payload.len());
+        }
+        memory::switch_cr3(saved);
+
+        // Allocate a kernel stack and build the iretq-to-Ring3 frame on it (same layout as
+        // tasking::spawn_user_process and the asm timer ISR's save/restore).
+        let mut kstack = alloc::vec![0u8; 4096 * 8];
+        let base = kstack.as_ptr() as u64;
+        let top = (base + kstack.len() as u64) & !0xF;
+
+        let sel = gdt::selectors();
+        let user_cs = (sel.user_code.0 | 0b11) as u64;
+        let user_ss = (sel.user_data.0 | 0b11) as u64;
+        let rflags: u64 = 0x202; // IF set
+        let user_rsp = USER_STACK_START + 4096;
+
+        unsafe fn push(sp: &mut u64, v: u64) {
+            *sp -= 8;
+            *(*sp as *mut u64) = v;
+        }
+        let mut sp = top;
+        unsafe {
+            push(&mut sp, user_ss);
+            push(&mut sp, user_rsp);
+            push(&mut sp, rflags);
+            push(&mut sp, user_cs);
+            push(&mut sp, USER_CODE_START); // rip
+            for _ in 0..15 {
+                push(&mut sp, 0); // r15..rax
+            }
+        }
+        let saved_rsp = sp;
+        let rsp0_top = VirtAddr::new(top);
+
+        TEST_KSTACKS.lock().push(kstack);
+        Ring3Handle { saved_rsp, cr3, rsp0_top }
+    })
 }
 
 fn enter_user_mode_elf(
@@ -838,14 +1004,15 @@ unsafe fn iretq_to_user(entry: VirtAddr, user_stack_top: VirtAddr) -> ! {
     let user_cs = x86_64::structures::gdt::SegmentSelector::new(sel.user_code.index(), PrivilegeLevel::Ring3);
     let user_ss = x86_64::structures::gdt::SegmentSelector::new(sel.user_data.index(), PrivilegeLevel::Ring3);
 
-    let rflags: u64 = 0x202; // IF=1, reserved bit 1 always set
-    
-    crate::arch::disable_interrupts();
+    // RFLAGS: IF=1 (interrupts enabled), IOPL=0, Reserved bit 1 always set
+    let rflags: u64 = 0x202;
     
     let ss_val = user_ss.0 as u64;
     let cs_val = user_cs.0 as u64;
     let rsp_val = user_stack_top.as_u64();
     let rip_val = entry.as_u64();
+    
+    serial::println!("[USER] Entering Ring 3 at {:#x}", rip_val);
     
     asm_iretq_to_user(rip_val, rsp_val, cs_val, ss_val, rflags);
 }

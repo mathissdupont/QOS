@@ -5,7 +5,7 @@ fn main() {
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     if target_os == "none" {
         let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap();
-        let script = std::path::PathBuf::from(manifest_dir).join("linker.ld");
+        let script = std::path::PathBuf::from(&manifest_dir).join("linker.ld");
 
         // Use an absolute path so the linker can always find it.
         // Note: `-T<path>` must be a single argument (no space after -T).
@@ -15,7 +15,10 @@ fn main() {
         // in our bare-metal boot flow.
         println!("cargo:rustc-link-arg=-no-pie");
 
+        // NOTE: assembly stubs now live in src/asm_stubs.rs via `global_asm!`, so no external
+        // C compiler (`cc`) is needed. This lets the kernel build with a pure-Rust toolchain
+        // (fixes local Windows builds where no ELF-producing C compiler is on PATH).
+
         println!("cargo:rerun-if-changed={}", script.display());
-        println!("cargo:rerun-if-changed=src/asm_stubs.s");
     }
 }

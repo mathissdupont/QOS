@@ -20,16 +20,40 @@ asm_triple_fault:
 .type asm_iretq_to_user, @function
 # Arguments (SysV):
 #   rdi = rip, rsi = rsp, rdx = cs, rcx = ss, r8 = rflags
-# Stack layout required by iretq (top of stack first): RIP, CS, RFLAGS, RSP, SS.
-# Push order below builds that layout in reverse so hardware pops the correct state.
+# iretq expects stack (bottom to top): SS, RSP, RFLAGS, CS, RIP
+# Push in reverse order (top to bottom on stack)
 asm_iretq_to_user:
-    # Stack on entry: 16-byte aligned in caller, misaligned here by call's return address.
-    # We deliberately keep the return address; pushing 5 qwords realigns the stack
-    # before the hardware pops state via iretq.
-    pushq %rcx        # SS
-    pushq %rsi        # RSP
+    # Build iretq frame (push in reverse order of pop)
+    pushq %rcx        # SS (user data segment)
+    pushq %rsi        # RSP (user stack pointer)
     pushq %r8         # RFLAGS
-    pushq %rdx        # CS
-    pushq %rdi        # RIP
+    pushq %rdx        # CS (user code segment)
+    pushq %rdi        # RIP (entry point)
+    
+    # Set data segments to user data selector BEFORE iretq
+    # This prevents #GP on return to Ring 3
+    mov %rcx, %rax    # SS value (already has RPL=3)
+    mov %ax, %ds
+    mov %ax, %es
+    mov %ax, %fs
+    mov %ax, %gs
+    
+    # Zero out registers for clean user mode entry
+    xor %rax, %rax
+    xor %rbx, %rbx
+    xor %rcx, %rcx
+    xor %rdx, %rdx
+    xor %rsi, %rsi
+    xor %rdi, %rdi
+    xor %r8, %r8
+    xor %r9, %r9
+    xor %r10, %r10
+    xor %r11, %r11
+    xor %r12, %r12
+    xor %r13, %r13
+    xor %r14, %r14
+    xor %r15, %r15
+    xor %rbp, %rbp
+    
     iretq
 .size asm_iretq_to_user, . - asm_iretq_to_user

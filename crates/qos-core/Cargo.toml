@@ -2,9 +2,18 @@
 name = "qos-core"
 version = "0.1.0"
 edition = "2021"
+description = "QOS quantum control-plane core runtime (no_std + alloc). See docs/adr/0003."
+
+[features]
+default = []
+# `std` enables the on-disk journal (event log persistence/recovery) and JSON
+# (de)serialization. Without it, qos-core is no_std + alloc and keeps an in-memory
+# event log only. See ADR-0003.
+std = ["serde", "serde_json", "serde/std", "serde_json/std", "qos-abi/serde"]
 
 [dependencies]
-uuid = { version = "1", features = ["v4", "serde"] }
-serde = { version = "1", features = ["derive"] }
-thiserror = "1"
-serde_json = "1"
+qos-abi = { path = "../qos-abi" }
+spin = "0.9"
+libm = "0.2"
+serde = { version = "1", default-features = false, features = ["derive", "alloc"], optional = true }
+serde_json = { version = "1", default-features = false, features = ["alloc"], optional = true }

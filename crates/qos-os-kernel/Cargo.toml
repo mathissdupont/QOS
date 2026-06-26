@@ -15,18 +15,20 @@ qos-abi = { path = "../qos-abi", default-features = false }
 libm = "0.2"
 
 [features]
-default = []
+default = ["userabi"]  # Enable user mode ABI by default
 userabi = []
 userdemo = ["userabi"]
 verify = []
 fat = []  # Optional FAT16 filesystem support at /fat mount
 
+[build-dependencies]
+cc = "1.0"
+
 [package.metadata.bootimage]
 # QEMU command for bootimage runner
-# Linux: uses system PATH (qemu-system-x86_64) in headless mode (for Docker/CI)
-# Windows: uses installed path with GUI
-# Override with QEMU_EXE environment variable if needed
-run-command = ["qemu-system-x86_64", "-drive", "if=ide,index=0,media=disk,format=raw,file={}", "-nographic", "-serial", "mon:stdio"]
+# VNC mode: accessible at localhost:5900 (VNC display :0)
+# Use RealVNC Viewer to connect to localhost:5900
+run-command = ["qemu-system-x86_64", "-drive", "if=ide,index=0,media=disk,format=raw,file={}", "-vnc", ":0", "-serial", "mon:stdio"]
 
 [profile.dev]
 panic = "abort"

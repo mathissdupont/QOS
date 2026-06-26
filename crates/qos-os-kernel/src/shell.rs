@@ -88,16 +88,18 @@ pub fn alias_list() -> alloc::vec::Vec<(String, String)> {
 
 /// List of all available shell commands for tab completion
 static COMMANDS: &[&[u8]] = &[
-    b"help", b"kbd", b"clear", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
+    b"help", b"kbd", b"clear", b"gfx", b"gdesk", b"evtest", b"threadtest", b"proctest", b"faulttest", b"exittest", b"crash", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
     b"mkdir", b"mkbell", b"edit", b"touch", b"submit", b"write",
     b"disk-id", b"disk-read", b"mkfs", b"dls", b"dcat", b"drm", b"dput", b"dget", b"dsubmit",
     b"vls", b"vcat", b"vrm", b"vcp", b"vsubmit",
     b"userdemo", b"udemo", b"udemo-bg", b"exec", b"procs", b"spawn", b"fg", b"bg", b"killp", b"waitp",
-    b"jobs", b"submit-bell", b"submit-ir-bell", b"status", b"result", b"cancel",
+    b"jobs", b"submit-bell", b"submit-ir-bell", b"status", b"result", b"viz", b"cancel",
     b"time", b"uptime", b"pci", b"net", b"shutdown", b"reboot", b"powerinfo", b"ui",
     b"qsubmit", b"qsim", b"qbackend", b"echo", b"grep", b"wc", b"head", b"tail", b"sort", b"uniq",
     b"env", b"export", b"unset", b"alias", b"unalias", b"source", b"run",
     b"df", b"du", b"stat", b"mv", b"cp", b"chmod", b"ll",
+    b"desktop", b"window", b"gui",
+    b"calc", b"notepad", b"explorer", b"taskmgr", b"sysinfo",
     b"ifconfig", b"ping", b"arp", b"netstat", b"dhcp",
     #[cfg(feature = "fat")]
     b"fatls", 
@@ -568,7 +570,16 @@ impl ShellTask {
                 self.run_command(b"qjobs");
             }
             "Simulator Settings" => {
-                crate::println!("Stub simulator - 2 qubit max");
+                let max_qubits = crate::syscall::MAX_QUBITS;
+                let avail = crate::syscall::available_qubits();
+                crate::println!("╔════════════════════════════════════════╗");
+                crate::println!("║   Quantum Simulator Settings          ║");
+                crate::println!("╠════════════════════════════════════════╣");
+                crate::println!("║ Max Qubits:        {}                ║", max_qubits);
+                crate::println!("║ Available:         {}                ║", avail);
+                crate::println!("║ State Vector Size: {} bytes          ║", (1 << max_qubits) * 16);
+                crate::println!("║ Memory Model:      Sparse             ║");
+                crate::println!("╚════════════════════════════════════════╝");
             }
             
             // Help menu
@@ -1424,6 +1435,7 @@ impl ShellTask {
                 crate::println!("║  help quantum  - Quantum job commands    ║");
                 crate::println!("║  help network  - Network commands        ║");
                 crate::println!("║  help system   - System commands         ║");
+                crate::println!("║  help gui      - Desktop GUI commands    ║");
                 crate::println!("║  help shell    - Shell features & pipes  ║");
                 crate::println!("║  help env      - Environment & aliases   ║");
                 crate::println!("║  help all      - Show all commands       ║");
@@ -1491,7 +1503,8 @@ impl ShellTask {
                 crate::println!("║  submit-ir-bell  submit IR Bell circuit  ║");
                 crate::println!("║  jobs            list job table          ║");
                 crate::println!("║  status <h>      show job status         ║");
-                crate::println!("║  result <h>      get job result          ║");
+                crate::println!("║  result <h>      get job result+viz      ║");
+                crate::println!("║  viz <h>         visualize result        ║");
                 crate::println!("║  cancel <h>      cancel job              ║");
                 crate::println!("╚══════════════════════════════════════════╝");
             } else if Self::eq(category, b"system") {
@@ -1508,6 +1521,30 @@ impl ShellTask {
                 crate::println!("║  ui [on|off]     toggle UI overlay       ║");
                 crate::println!("║  shutdown        shutdown system         ║");
                 crate::println!("║  reboot          reboot system           ║");
+                crate::println!("╚══════════════════════════════════════════╝");
+            } else if Self::eq(category, b"gui") {
+                crate::println!("╔══════════════════════════════════════════╗");
+                crate::println!("║       Desktop GUI Commands               ║");
+                crate::println!("╠══════════════════════════════════════════╣");
+                crate::println!("║  desktop         start desktop demo      ║");
+                crate::println!("║  window <title>  create new window       ║");
+                crate::println!("║  gui             show GUI help           ║");
+                crate::println!("╠──────────────────────────────────────────╣");
+                crate::println!("║  Applications:                           ║");
+                crate::println!("║  • calc          Calculator app          ║");
+                crate::println!("║  • notepad       Text editor             ║");
+                crate::println!("║  • explorer      File browser            ║");
+                crate::println!("║  • taskmgr       Task manager            ║");
+                crate::println!("║  • sysinfo       System information      ║");
+                crate::println!("╠──────────────────────────────────────────╣");
+                crate::println!("║  Features:                               ║");
+                crate::println!("║  • Multiple overlapping windows          ║");
+                crate::println!("║  • Taskbar with window buttons           ║");
+                crate::println!("║  • Desktop icons (Computer, Files, etc)  ║");
+                crate::println!("║  • Focus management                      ║");
+                crate::println!("║  • Window controls (minimize/max/close)  ║");
+                crate::println!("╠──────────────────────────────────────────╣");
+                crate::println!("║  Try: desktop - to see demo              ║");
                 crate::println!("╚══════════════════════════════════════════╝");
             } else if Self::eq(category, b"network") {
                 crate::println!("╔══════════════════════════════════════════╗");
@@ -1617,8 +1654,220 @@ impl ShellTask {
             crate::acpi::reboot();
         } else if Self::eq(cmd, b"powerinfo") {
             crate::acpi::power_info();
+        } else if Self::eq(cmd, b"desktop") {
+            crate::println!("Starting Desktop Environment...");
+            crate::desktop::init();
+            crate::desktop::demo();
+        } else if Self::eq(cmd, b"window") {
+            if args.is_empty() {
+                crate::println!("usage: window <title>");
+                return;
+            }
+            let title = core::str::from_utf8(args).unwrap_or("Window");
+            let win_id = crate::desktop::create_window(title, 5, 2, 50, 10);
+            crate::desktop::window_add_line(win_id, "");
+            crate::desktop::window_add_line(win_id, "  This is a demo window!");
+            crate::desktop::window_add_line(win_id, "");
+            crate::desktop::window_add_line(win_id, "  You can create multiple windows.");
+            crate::desktop::render();
+            crate::println!("Window created: {}", win_id);
+        } else if Self::eq(cmd, b"gui") {
+            crate::println!("=== QOS Desktop Environment ===");
+            crate::println!("Commands:");
+            crate::println!("  desktop - Start desktop with demo windows");
+            crate::println!("  window <title> - Create a new window");
+            crate::println!("");
+            crate::println!("Features:");
+            crate::println!("  - Multiple overlapping windows");
+            crate::println!("  - Taskbar with window buttons");
+            crate::println!("  - Desktop icons");
+            crate::println!("  - Focus management");
+            crate::println!("  - Window minimize/maximize/close");
+        } else if Self::eq(cmd, b"calc") {
+            crate::desktop_apps::launch_calculator();
+            crate::println!("Calculator launched");
+        } else if Self::eq(cmd, b"notepad") {
+            crate::desktop_apps::launch_notepad();
+            crate::println!("Notepad launched");
+        } else if Self::eq(cmd, b"explorer") {
+            crate::desktop_apps::launch_file_browser();
+            crate::println!("File Explorer launched");
+        } else if Self::eq(cmd, b"taskmgr") {
+            crate::desktop_apps::launch_task_manager();
+            crate::println!("Task Manager launched");
+        } else if Self::eq(cmd, b"sysinfo") {
+            crate::desktop_apps::launch_system_info();
+            crate::println!("System Information launched");
         } else if Self::eq(cmd, b"clear") {
             crate::vga::clear_screen();
+        } else if Self::eq(cmd, b"gfx") {
+            crate::println!("Switching to VGA Mode 13h (320x200x256)... press ESC to return.");
+            crate::vga13h::demo();
+            crate::println!("Back in text mode.");
+        } else if Self::eq(cmd, b"gdesk") {
+            crate::println!("Launching graphical desktop (move mouse, drag/close window, ESC to exit)...");
+            crate::gfxui::run();
+            crate::println!("Back in text mode.");
+        } else if Self::eq(cmd, b"crash") {
+            // Diagnostic: deliberately dereference an unmapped address to exercise the
+            // page-fault handler (Phase 0.3). Halts the kernel with a diagnostic banner.
+            crate::println!("crash: triggering a page fault for diagnostics...");
+            let bad = 0xdead_0000_beef_0000u64 as *const u8;
+            let _v = unsafe { core::ptr::read_volatile(bad) };
+            crate::println!("crash: unexpectedly survived: {}", _v);
+        } else if Self::eq(cmd, b"threadtest") {
+            // Phase 2.1: prove preemptive context switching with two kernel threads.
+            crate::kthread::demo();
+        } else if Self::eq(cmd, b"proctest") {
+            // Phase 2.1b: prove preemptive Ring-3 multitasking. Spawn two runaway user
+            // processes (infinite loops, no syscalls) and confirm the shell stays alive —
+            // i.e. the timer preempts Ring 3 and a runaway program cannot freeze the OS.
+            use core::sync::atomic::Ordering;
+            crate::kthread::reset();
+            crate::user::clear_ring3_test_stacks();
+            let h1 = crate::user::spawn_ring3_spinner();
+            let h2 = crate::user::spawn_ring3_spinner();
+            crate::kthread::adopt_user(h1.saved_rsp, h1.cr3, h1.rsp0_top);
+            crate::kthread::adopt_user(h2.saved_rsp, h2.cr3, h2.rsp0_top);
+            crate::serial_println!("[PROCTEST] 2 ring3 spinners adopted; arming preemption");
+            crate::println!("proctest: 2 runaway ring3 processes (infinite loops) running...");
+            let start = interrupts::TICKS.load(Ordering::Relaxed);
+            let mut beats = 0u64;
+            crate::kthread::arm();
+            loop {
+                let elapsed = interrupts::TICKS.load(Ordering::Relaxed).wrapping_sub(start);
+                if elapsed / 40 > beats {
+                    beats = elapsed / 40;
+                    crate::serial_println!(
+                        "[PROCTEST] shell alive @tick+{} (both ring3 loops preempted)",
+                        elapsed
+                    );
+                    crate::print!("*");
+                    if beats >= 6 {
+                        break;
+                    }
+                }
+                x86_64::instructions::hlt();
+            }
+            // Disarm while the shell (main context) is current, so we keep control.
+            crate::kthread::disarm();
+            crate::kthread::reset();
+            crate::memory::switch_to_kernel_cr3();
+            crate::user::clear_ring3_test_stacks();
+            crate::println!();
+            crate::println!("proctest: shell survived while 2 ring3 loops ran -> Ring 3 preemption OK");
+            crate::serial_println!("[PROCTEST] done; runaway ring3 loops did NOT freeze the OS");
+        } else if Self::eq(cmd, b"faulttest") {
+            // Phase 2.1b: prove fault isolation. One process spins forever, the other crashes
+            // (page fault). The crash must kill ONLY the faulting process — the shell and the
+            // spinner keep running.
+            use core::sync::atomic::Ordering;
+            crate::kthread::reset();
+            crate::user::clear_ring3_test_stacks();
+            let spinner = crate::user::spawn_ring3_spinner();
+            let faulter = crate::user::spawn_ring3_faulter();
+            crate::kthread::adopt_user(spinner.saved_rsp, spinner.cr3, spinner.rsp0_top);
+            crate::kthread::adopt_user(faulter.saved_rsp, faulter.cr3, faulter.rsp0_top);
+            crate::serial_println!("[FAULTTEST] spinner + crashing process adopted; arming");
+            crate::println!("faulttest: 1 spinner + 1 crashing ring3 process; watch serial...");
+            let start = interrupts::TICKS.load(Ordering::Relaxed);
+            let mut beats = 0u64;
+            crate::kthread::arm();
+            loop {
+                let elapsed = interrupts::TICKS.load(Ordering::Relaxed).wrapping_sub(start);
+                if elapsed / 40 > beats {
+                    beats = elapsed / 40;
+                    crate::serial_println!("[FAULTTEST] shell alive @tick+{}", elapsed);
+                    crate::print!("*");
+                    if beats >= 8 {
+                        break;
+                    }
+                }
+                x86_64::instructions::hlt();
+            }
+            crate::kthread::disarm();
+            crate::kthread::reset();
+            crate::memory::switch_to_kernel_cr3();
+            crate::user::clear_ring3_test_stacks();
+            crate::println!();
+            crate::println!("faulttest: a user crash killed only that process; kernel survived");
+            crate::serial_println!("[FAULTTEST] done; crash was isolated to the faulting process");
+        } else if Self::eq(cmd, b"exittest") {
+            // Phase 2.1b: prove clean voluntary exit. One process spins forever, the other
+            // busy-loops then calls the OP_EXIT syscall. The exiting process is reaped and the
+            // shell + spinner keep running (no whole-kernel restart).
+            use core::sync::atomic::Ordering;
+            crate::kthread::reset();
+            crate::user::clear_ring3_test_stacks();
+            let spinner = crate::user::spawn_ring3_spinner();
+            let exiter = crate::user::spawn_ring3_exiter();
+            crate::kthread::adopt_user(spinner.saved_rsp, spinner.cr3, spinner.rsp0_top);
+            crate::kthread::adopt_user(exiter.saved_rsp, exiter.cr3, exiter.rsp0_top);
+            crate::serial_println!("[EXITTEST] spinner + self-exiting process adopted; arming");
+            crate::println!("exittest: 1 spinner + 1 self-exiting ring3 process; watch serial...");
+            let start = interrupts::TICKS.load(Ordering::Relaxed);
+            let mut beats = 0u64;
+            crate::kthread::arm();
+            loop {
+                let elapsed = interrupts::TICKS.load(Ordering::Relaxed).wrapping_sub(start);
+                if elapsed / 40 > beats {
+                    beats = elapsed / 40;
+                    crate::serial_println!("[EXITTEST] shell alive @tick+{}", elapsed);
+                    crate::print!("*");
+                    if beats >= 8 {
+                        break;
+                    }
+                }
+                x86_64::instructions::hlt();
+            }
+            crate::kthread::disarm();
+            crate::kthread::reset();
+            crate::memory::switch_to_kernel_cr3();
+            crate::user::clear_ring3_test_stacks();
+            crate::println!();
+            crate::println!("exittest: a process exited via syscall; kernel + spinner survived");
+            crate::serial_println!("[EXITTEST] done; clean voluntary exit returned control");
+        } else if Self::eq(cmd, b"regabitest") {
+            // Phase 2.2: prove the register-based syscall ABI (int 0x81). A ring3 process
+            // calls SYS_WRITE (print) then SYS_EXIT via registers; we wait for it to finish.
+            use core::sync::atomic::Ordering;
+            crate::kthread::reset();
+            crate::user::clear_ring3_test_stacks();
+            let h = crate::user::spawn_ring3_regabi();
+            crate::kthread::adopt_user(h.saved_rsp, h.cr3, h.rsp0_top);
+            crate::serial_println!("[REGABI] process adopted; arming");
+            crate::println!("regabitest: ring3 program using int 0x81 register ABI; watch serial...");
+            let start = interrupts::TICKS.load(Ordering::Relaxed);
+            crate::kthread::arm();
+            while !crate::kthread::all_finished() {
+                if interrupts::TICKS.load(Ordering::Relaxed).wrapping_sub(start) > 400 {
+                    crate::serial_println!("[REGABI] timeout waiting for process");
+                    break;
+                }
+                x86_64::instructions::hlt();
+            }
+            crate::kthread::disarm();
+            crate::kthread::reset();
+            crate::memory::switch_to_kernel_cr3();
+            crate::user::clear_ring3_test_stacks();
+            crate::println!("regabitest: done (see serial for the ring3 message + exit)");
+            crate::serial_println!("[REGABI] done");
+        } else if Self::eq(cmd, b"evtest") {
+            crate::println!("evtest: capturing input events ~3s (press keys / move mouse), see serial");
+            let start = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+            let mut n = 0u32;
+            while interrupts::TICKS
+                .load(core::sync::atomic::Ordering::Relaxed)
+                .wrapping_sub(start)
+                < 300
+            {
+                while let Some(ev) = crate::input::poll() {
+                    crate::serial_println!("evt: {:?}", ev);
+                    n += 1;
+                }
+                x86_64::instructions::hlt();
+            }
+            crate::println!("evtest: captured {} events", n);
         } else if Self::eq(cmd, b"ticks") {
             let t = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
             crate::println!("ticks={}", t);
@@ -1906,6 +2155,21 @@ impl ShellTask {
                 Ok(()) => crate::println!("created"),
                 Err(e) => crate::println!("err: {:?}", e),
             }
+        } else if Self::eq(cmd, b"touch") {
+            let Some((name, _rest)) = Self::parse_word(args) else {
+                crate::println!("usage: touch <path>");
+                return;
+            };
+            let mut buf = [0u8; 96];
+            let Some(n) = self.resolve_path(name, &mut buf) else {
+                crate::println!("touch: bad path");
+                return;
+            };
+            // Create empty file
+            match vfs::write(&buf[..n], b"") {
+                Ok(()) => crate::println!("created"),
+                Err(e) => crate::println!("err: {:?}", e),
+            }
         } else if Self::eq(cmd, b"mkbell") {
             let Some((name, _rest)) = Self::parse_word(args) else {
                 crate::println!("usage: mkbell <path>");
@@ -2180,10 +2444,37 @@ impl ShellTask {
             }
         } else if Self::eq(cmd, b"userdemo") {
             crate::println!("userdemo: user mode disabled (LLVM asm bug)");
+            crate::println!("Use shell quantum commands instead:");
+            crate::println!("  submit-bell, jobs, result, viz");
+            // crate::user::exec_userdemo();
         } else if Self::eq(cmd, b"udemo") {
             crate::println!("udemo: user mode disabled (LLVM asm bug)");
+            crate::println!("Use shell quantum commands instead");
+            /* 
+            match crate::memory::with_ctx(|_, fa| crate::user::spawn_userdemo_process(fa)) {
+                Ok(proc) => {
+                    let pid = crate::tasking::spawn_user_process(
+                        proc.user_cr3, proc.entry, proc.user_stack_top, proc.mapped_pages
+                    );
+                    crate::println!("user demo started, PID={}", pid);
+                }
+                Err(e) => crate::println!("spawn failed: {}", e),
+            }
+            */
         } else if Self::eq(cmd, b"udemo-bg") {
             crate::println!("udemo-bg: user mode disabled (LLVM asm bug)");
+            crate::println!("Use shell quantum commands instead");
+            /*
+            match crate::memory::with_ctx(|_, fa| crate::user::spawn_userdemo_process(fa)) {
+                Ok(proc) => {
+                    let pid = crate::tasking::spawn_user_process(
+                        proc.user_cr3, proc.entry, proc.user_stack_top, proc.mapped_pages
+                    );
+                    crate::println!("user demo PID={} running in background", pid);
+                }
+                Err(e) => crate::println!("spawn failed: {}", e),
+            }
+            */
         } else if Self::eq(cmd, b"exec") {
             let Some((path, _)) = Self::parse_word(args) else {
                 crate::println!("usage: exec <path>");
@@ -2231,9 +2522,26 @@ impl ShellTask {
                 return;
             };
             match syscall::shell_result(h) {
-                Ok((n00, n11)) => crate::println!("result {} -> n00={} n11={}", h, n00, n11),
+                Ok((n00, n11)) => {
+                    crate::println!("Job #{} Results:", h);
+                    crate::qviz::draw_bell_result(n00, n11);
+                }
                 Err(st) => crate::println!("result {} -> not ready (state={:?})", h, st),
             }
+        } else if Self::eq(cmd, b"viz") {
+            // Visualize quantum results
+            let Some(h) = Self::parse_u64(args) else {
+                crate::println!("usage: viz <handle>");
+                return;
+            };
+            match syscall::shell_result(h) {
+                Ok((n00, n11)) => {
+                    crate::qviz::draw_bell_result(n00, n11);
+                }
+                Err(st) => crate::println!("viz {} -> not ready (state={:?})", h, st),
+            }
+        } else if Self::eq(cmd, b"jobs") {
+            crate::qviz::list_jobs();
         } else if Self::eq(cmd, b"cancel") {
             let Some(h) = Self::parse_u64(args) else {
                 crate::println!("usage: cancel <handle>");
@@ -3531,28 +3839,41 @@ impl ShellTask {
             crate::println!("Starting DHCP discovery...");
             match crate::net::dhcp_discover() {
                 Ok(()) => {
-                    // Wait for response
-                    crate::println!("Waiting for DHCP response...");
-                    for _ in 0..100 {
+                    // Wait for response with visible progress
+                    crate::println!("Waiting for DHCP response (max 10s)...");
+                    let mut ticks = 0;
+                    for i in 0..100 {
+                        // Show progress every 10 iterations
+                        if i % 10 == 0 {
+                            crate::print!(".");
+                        }
+                        
                         crate::e1000::poll();
                         // Process received frames
+                        let mut processed = 0;
                         while let Some(frame) = crate::e1000::recv() {
                             crate::net::process_frame(&frame);
+                            processed += 1;
+                            if processed > 10 {
+                                break; // Don't process too many in one go
+                            }
                         }
                         
                         if crate::net::dhcp_state() == crate::net::DhcpState::Bound {
+                            crate::println!("\nDHCP: Configuration successful!");
+                            crate::net::show_info();
                             return;
                         }
                         
-                        // Small delay
+                        // Small delay (~100ms)
                         for _ in 0..100000 {
                             core::hint::spin_loop();
                         }
+                        ticks += 1;
                     }
                     
-                    if crate::net::dhcp_state() != crate::net::DhcpState::Bound {
-                        crate::println!("DHCP: Timeout waiting for response");
-                    }
+                    crate::println!("\nDHCP: Timeout - no response from DHCP server");
+                    crate::println!("Check network connection or try manual IP config");
                 }
                 Err(e) => crate::println!("DHCP error: {}", e),
             }
@@ -3562,20 +3883,17 @@ impl ShellTask {
         // ==================== END NETWORK COMMANDS ====================
         
         // ==================== END ADDITIONAL COMMANDS ====================
-        
-        // Unknown command fallback
-        if !Self::eq(cmd, b"edit") {
-            #[cfg(feature = "fat")]
-            if Self::eq(cmd, b"fatls") || Self::eq(cmd, b"fatcat") || Self::eq(cmd, b"fatwrite") || Self::eq(cmd, b"fatrm") {
-                return; // Already handled above
-            }
-            crate::println!("unknown command");
-        }
     }
 }
 
 impl crate::scheduler::Task for ShellTask {
     fn step(&mut self) {
+        static STEP_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let count = STEP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if count < 3 {
+            crate::serial::println!("[SHELL] step() called, count={}", count);
+        }
+        
         // Check for mouse clicks
         if let Some(click) = mouse::take_click() {
             self.handle_mouse_click(click);

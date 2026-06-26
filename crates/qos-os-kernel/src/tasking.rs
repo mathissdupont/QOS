@@ -11,12 +11,23 @@ use crate::{gdt, memory};
 pub enum ProcState {
     Ready,
     Running,
+    Sleeping,  // NEW: Blocked waiting for wake
     Exited,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Priority {
+    High = 4,
+    Normal = 2,
+    Low = 1,
 }
 
 pub struct Process {
     pub pid: u64,
     pub state: ProcState,
+    pub priority: Priority,  // NEW: Scheduling priority
+    pub time_slice: u64,     // NEW: Remaining quantum ticks
+    pub wake_time: u64,      // NEW: Wake up at this tick (for sleep)
     pub exit_code: u64,
 
     // Saved kernel stack pointer (points to the saved-regs block used by our trap stubs).
@@ -40,6 +51,9 @@ static LAST_IDX: AtomicU64 = AtomicU64::new(0);
 
 // Foreground scheduled PID (0 means none). Used for Ctrl+C targeting and simple fg waits.
 static FOREGROUND_PID: AtomicU64 = AtomicU64::new(0);
+
+// Timer tick counter for sleep/wake
+static TIMER_TICKS: AtomicU64 = AtomicU64::new(0);
 
 // If non-zero: request to terminate the current running scheduled process with this exit code.
 static KILL_CURRENT_EXIT_CODE: AtomicU64 = AtomicU64::new(0);
@@ -133,6 +147,9 @@ pub fn spawn_user_process(
     let proc = Process {
         pid,
         state: ProcState::Ready,
+        priority: Priority::Normal,
+        time_slice: 0,
+        wake_time: 0,
         exit_code: 0,
         saved_rsp: sp,
         kstack,
@@ -143,6 +160,30 @@ pub fn spawn_user_process(
 
     PROCS.lock().push(proc);
     pid
+}
+
+pub fn set_priority(pid: u64, priority: Priority) -> bool {
+    let mut procs = PROCS.lock();
+    if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
+        p.priority = priority;
+        true
+    } else {
+        false
+    }
+}
+
+pub fn sleep_current(ticks: u64) {
+    let pid = CURRENT_PID.load(Ordering::Relaxed);
+    if pid == 0 {
+        return;
+    }
+    
+    let wake_time = TIMER_TICKS.load(Ordering::Relaxed) + ticks;
+    let mut procs = PROCS.lock();
+    if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
+        p.state = ProcState::Sleeping;
+        p.wake_time = wake_time;
+    }
 }
 
 pub fn list_processes() -> alloc::vec::Vec<(u64, ProcState, u64)> {
@@ -176,8 +217,8 @@ pub fn kill_with_exit(pid: u64, exit_code: u64) -> bool {
     clear_foreground(pid);
     bump_exit_seq();
 
-    // User module disabled - skip address space cleanup
-    // crate::user::cleanup_spawned_user_process(p.user_cr3, &mut p.mapped_pages);
+    // Cleanup user address space
+    crate::user::cleanup_spawned_user_process(p.user_cr3, &mut p.mapped_pages);
     true
 }
 
@@ -194,30 +235,36 @@ pub fn find_process(pid: u64) -> Option<(ProcState, u64)> {
 }
 
 pub fn on_timer_trap(current_saved_rsp: u64) -> u64 {
+    // Increment global timer
+    TIMER_TICKS.fetch_add(1, Ordering::Relaxed);
+    let now = TIMER_TICKS.load(Ordering::Relaxed);
+    
+    // Wake up sleeping processes
+    {
+        let mut procs = PROCS.lock();
+        for p in procs.iter_mut() {
+            if p.state == ProcState::Sleeping && now >= p.wake_time {
+                p.state = ProcState::Ready;
+            }
+        }
+    }
+    
     // Record the current context.
     if is_user_frame(current_saved_rsp) {
         let pid = CURRENT_PID.load(Ordering::Relaxed);
         if pid == 0 {
-            // User mode is running outside the scheduler (e.g. current verify/userdemo path).
-            // Don't attempt to preempt/switch until user execution is represented as a Process.
-            return 0;
-        }
-
-        let mut procs = PROCS.lock();
-        if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
-            p.saved_rsp = current_saved_rsp;
-            if p.state == ProcState::Running {
+            SHELL_SAVED_RSP.store(current_saved_rsp, Ordering::Relaxed);
+        } else {
+            let mut procs = PROCS.lock();
+            if let Some(p) = procs.iter_mut().find(|p| p.pid == pid) {
+                p.saved_rsp = current_saved_rsp;
                 p.state = ProcState::Ready;
+                // Decrement time slice
+                if p.time_slice > 0 {
+                    p.time_slice -= 1;
+                }
             }
         }
-
-        // If we were asked to kill the current process (e.g. Ctrl+C), do it now and return to shell.
-        let kill_code = KILL_CURRENT_EXIT_CODE.swap(0, Ordering::Relaxed);
-        if kill_code != 0 {
-            return exit_current_and_switch_to_shell(kill_code);
-        }
-    } else {
-        SHELL_SAVED_RSP.store(current_saved_rsp, Ordering::Relaxed);
     }
 
     // Round-robin pick next runnable context among: shell + READY user processes.
@@ -236,6 +283,7 @@ pub fn on_timer_trap(current_saved_rsp: u64) -> u64 {
             if p.state == ProcState::Ready {
                 CURRENT_PID.store(p.pid, Ordering::Relaxed);
                 p.state = ProcState::Running;
+                p.time_slice = p.priority as u64;  // Reset quantum
                 gdt::set_rsp0(p.kstack_top);
                 memory::switch_cr3(p.user_cr3);
                 return p.saved_rsp;
@@ -243,20 +291,28 @@ pub fn on_timer_trap(current_saved_rsp: u64) -> u64 {
         }
     }
 
+    // Weighted round-robin: pick process with highest priority
     let start = (LAST_IDX.load(Ordering::Relaxed) as usize + 1) % total;
     let mut choice: Option<usize> = None;
+    let mut best_priority = 0u8;
+    
     for off in 0..total {
         let idx = (start + off) % total;
         if idx == 0 {
             if SHELL_SAVED_RSP.load(Ordering::Relaxed) != 0 {
-                choice = Some(0);
-                break;
+                if choice.is_none() {
+                    choice = Some(0);
+                    best_priority = Priority::Normal as u8;
+                }
             }
         } else {
             let p = &procs[idx - 1];
             if p.state == ProcState::Ready {
-                choice = Some(idx);
-                break;
+                let pri = p.priority as u8;
+                if choice.is_none() || pri > best_priority {
+                    choice = Some(idx);
+                    best_priority = pri;
+                }
             }
         }
     }
@@ -318,8 +374,8 @@ pub fn exit_current_and_switch_to_shell(exit_code: u64) -> u64 {
             p.state = ProcState::Exited;
             p.exit_code = exit_code;
 
-            // User module disabled - skip address space cleanup
-            // crate::user::cleanup_spawned_user_process(p.user_cr3, &mut p.mapped_pages);
+            // Cleanup user address space
+            crate::user::cleanup_spawned_user_process(p.user_cr3, &mut p.mapped_pages);
         }
     }
 

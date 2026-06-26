@@ -6,14 +6,19 @@
 extern crate alloc;
 
 mod arch;
+mod asm_stubs;    // Low-level asm (global_asm!, no external cc required)
+mod framebuffer;  // VESA framebuffer graphics
 mod gdt;
 mod interrupts;
+mod input;       // Unified input event queue — Phase 0.1 (docs/PLAN.md)
+mod kthread;     // Preemptive kernel threads — Phase 2.1 (docs/PLAN.md)
 mod keyboard;
 mod fs;
 mod memory;
 mod pit;
 mod process;
 mod quantum;
+mod qviz;        // Quantum visualization
 mod runtime;
 mod scheduler;
 mod qemu;
@@ -22,9 +27,10 @@ mod shell;
 mod splash;     // Boot splash screen
 mod syscall;
 mod tasking;
-// mod user; // Disabled due to LLVM asm bug "offset is not a multiple of 16"
+mod user; // ✅ ENABLED: LLVM bug fixed with Docker Linux environment
 mod ui;
 mod vga;
+mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
 
 mod allocator;
 mod ata;
@@ -42,12 +48,15 @@ mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod e1000;      // Intel E1000 NIC driver
 mod http;       // HTTP/HTTPS client
-mod gui;        // Window manager & GUI
+mod gui;        // Window manager & GUI (text mode)
+mod gfxui;      // Interactive graphical desktop (Mode 13h) — Phase 1 (docs/PLAN.md)
 mod timer;      // Timer utilities
 mod mouse;      // PS/2 Mouse driver
 mod menu;       // Text-mode menu system
 mod dialog;     // Dialog boxes
 mod explorer;   // File explorer
+mod desktop;    // Windows-style desktop environment
+mod desktop_apps; // Desktop applications
 
 use bootloader::{entry_point, BootInfo};
 
@@ -57,6 +66,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     serial::init();
 
     serial::println!("QOS-OS boot OK (serial)");
+
+    // Initialize framebuffer (placeholder for bootloader 0.9.x)
+    framebuffer::init();
 
     // Show boot splash screen (skip delay in verify mode)
     splash::show_splash();

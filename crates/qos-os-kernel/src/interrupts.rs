@@ -48,14 +48,28 @@ lazy_static! {
                 .set_stack_index(gdt::DOUBLE_FAULT_IST_INDEX);
         }
 
-        idt[InterruptIndex::Timer.as_u8()].set_handler_fn(timer_interrupt_handler);
+        // Preemptive timer ISR (Phase 2.1): a raw global_asm entry that saves the full
+        // register context so we can context-switch on the tick. `timer_dispatch` is its C
+        // callback. Installed via set_handler_addr because the entry is not an
+        // `extern "x86-interrupt"` fn.
+        unsafe {
+            idt[InterruptIndex::Timer.as_u8()]
+                .set_handler_addr(x86_64::VirtAddr::new(crate::asm_stubs::asm_timer_isr as usize as u64));
+        }
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
 
-        // Syscall entry point (Milestone 2).
+        // Syscall entry point (Milestone 2): shared-memory ABI.
         idt[0x80]
             .set_handler_fn(syscall::syscall_interrupt_handler)
             .set_privilege_level(PrivilegeLevel::Ring3);
+
+        // Register-based syscall ABI (Phase 2.2): rax=number, rdi/rsi/...=args, return in rax.
+        unsafe {
+            idt[0x81]
+                .set_handler_addr(x86_64::VirtAddr::new(crate::asm_stubs::asm_syscall_isr as usize as u64))
+                .set_privilege_level(PrivilegeLevel::Ring3);
+        }
 
         idt
     };
@@ -83,6 +97,18 @@ fn is_user_mode(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
 }
 
+/// Print a clear halt banner to both serial and screen, then stop. Used when a fault happens
+/// in kernel context (no process to kill). Phase 0.3 (docs/PLAN.md).
+fn kernel_halt(reason: &str) -> ! {
+    serial::println!("*** KERNEL HALTED: {} *** (reboot to recover)", reason);
+    vga::println!("");
+    vga::println!("*** KERNEL HALTED: {} ***", reason);
+    vga::println!("Reboot (restart QEMU) to recover.");
+    loop {
+        arch::hlt();
+    }
+}
+
 fn terminate_user_and_restart(reason: &'static str, exit_code: u64) -> ! {
     crate::process::exit_foreground(exit_code);
 
@@ -103,6 +129,11 @@ extern "x86-interrupt" fn invalid_opcode_handler(stack_frame: InterruptStackFram
     vga::println!("EXCEPTION: INVALID OPCODE");
 
     if is_user_mode(&stack_frame) {
+        if crate::kthread::is_user_current() {
+            serial::println!("[user] #UD -> killing process; kernel survives");
+            vga::println!("[user] invalid opcode -> process killed (others survive)");
+            crate::kthread::kill_current_and_park();
+        }
         terminate_user_and_restart("USER_UD", 0x100 + 6)
     }
 
@@ -113,14 +144,21 @@ extern "x86-interrupt" fn general_protection_fault_handler(
     stack_frame: InterruptStackFrame,
     error_code: u64,
 ) {
-    serial::println!("EXCEPTION: GENERAL PROTECTION FAULT (code={:#x})\n{:#?}", error_code, stack_frame);
-    vga::println!("EXCEPTION: GPF");
+    let rip = stack_frame.instruction_pointer.as_u64();
+    serial::println!("EXCEPTION: GENERAL PROTECTION FAULT (code={:#x}, rip={:#x})\n{:#?}", error_code, rip, stack_frame);
 
     if is_user_mode(&stack_frame) {
+        if crate::kthread::is_user_current() {
+            serial::println!("[user] GPF (code={:#x}) -> killing process; kernel survives", error_code);
+            vga::println!("[user] GPF -> process killed (others survive)");
+            crate::kthread::kill_current_and_park();
+        }
+        vga::println!("[user] GPF (code={:#x}) -> process killed", error_code);
         terminate_user_and_restart("USER_GPF", 0x100 + 13)
     }
 
-    loop { arch::hlt(); }
+    vga::println!("EXCEPTION: GPF code={:#x} rip={:#x}", error_code, rip);
+    kernel_halt("general protection fault");
 }
 
 extern "x86-interrupt" fn page_fault_handler(
@@ -128,20 +166,30 @@ extern "x86-interrupt" fn page_fault_handler(
     error_code: PageFaultErrorCode,
 ) {
     let addr = Cr2::read();
+    let rip = stack_frame.instruction_pointer.as_u64();
     serial::println!(
-        "EXCEPTION: PAGE FAULT (addr={:?}, err={:?})\n{:#?}",
+        "EXCEPTION: PAGE FAULT (addr={:?}, err={:?}, rip={:#x})\n{:#?}",
         addr,
         error_code,
+        rip,
         stack_frame
     );
-    vga::println!("EXCEPTION: PAGE FAULT");
 
     if is_user_mode(&stack_frame) {
+        // Preemptive path: kill only this process, leave the kernel and other processes alive.
+        if crate::kthread::is_user_current() {
+            serial::println!("[user] PAGE FAULT @ {:?} -> killing process; kernel survives", addr);
+            vga::println!("[user] page fault -> process killed (others survive)");
+            crate::kthread::kill_current_and_park();
+        }
+        vga::println!("[user] PAGE FAULT @ {:?} -> process killed", addr);
         // Conventional-ish exit code: 0x100 + 14 (page fault vector)
         terminate_user_and_restart("USER_PF", 0x100 + 14)
     }
 
-    loop { arch::hlt(); }
+    vga::println!("EXCEPTION: PAGE FAULT @ {:?}", addr);
+    vga::println!("  rip={:#x}  cause={:?}", rip, error_code);
+    kernel_halt("page fault");
 }
 
 extern "x86-interrupt" fn double_fault_handler(
@@ -149,24 +197,27 @@ extern "x86-interrupt" fn double_fault_handler(
     _error_code: u64,
 ) -> ! {
     serial::println!("EXCEPTION: DOUBLE FAULT\n{:#?}", stack_frame);
-    vga::println!("EXCEPTION: DOUBLE FAULT");
-
-    loop {
-        arch::hlt();
-    }
+    vga::println!("EXCEPTION: DOUBLE FAULT rip={:#x}", stack_frame.instruction_pointer.as_u64());
+    kernel_halt("double fault");
 }
 
-// Simple timer interrupt handler without naked_asm complexity
-extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    // Update tick counter
+/// C callback for the preemptive timer ISR (`asm_timer_isr`). Runs with interrupts disabled.
+/// `saved_rsp` points at the saved register block of the interrupted thread; the return value
+/// is the stack pointer to resume on (same thread, or another when preemption is armed).
+#[no_mangle]
+pub extern "C" fn timer_dispatch(saved_rsp: u64) -> u64 {
     TICKS.fetch_add(1, Ordering::Relaxed);
-    
-    // Notify syscall module
     crate::syscall::on_timer_tick();
-    
-    // Send EOI
+
+    // Acknowledge the interrupt before any potential context switch.
     unsafe {
         PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    }
+
+    if crate::kthread::armed() {
+        crate::kthread::schedule(saved_rsp)
+    } else {
+        saved_rsp
     }
 }
 

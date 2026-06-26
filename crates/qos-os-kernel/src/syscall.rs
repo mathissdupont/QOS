@@ -186,9 +186,12 @@ impl JobSlot {
         let ir = self.get_ir();
         let ir_str = core::str::from_utf8(&ir).unwrap_or("");
         
+        crate::serial::println!("[QUANTUM] Parsing QASM: {}", ir_str);
+        
         match parse_qasm(ir_str) {
             Ok(circuit) => {
                 let n_qubits = circuit.n_qubits;
+                crate::serial::println!("[QUANTUM] Parse OK: {} qubits, {} gates", n_qubits, circuit.gates.len());
                 // Store the actual qubit count from the parsed circuit
                 self.n_qubits.store(n_qubits as u32, Ordering::Relaxed);
                 *self.circuit.lock() = Some(circuit);
@@ -196,7 +199,8 @@ impl JobSlot {
                 self.current_shot.store(0, Ordering::Relaxed);
                 true
             }
-            Err(_e) => {
+            Err(e) => {
+                crate::serial::println!("[QUANTUM] Parse ERROR: {:?}", e);
                 false
             }
         }
@@ -324,9 +328,12 @@ fn schedule_slot(idx: usize) {
         return;
     }
     
+    crate::serial::println!("[QUANTUM] schedule_slot: handle={} idx={}", handle, idx);
+    
     // Initialize circuit FIRST to determine actual qubit count from QASM
     if !slot.init_circuit() {
         // Parse failed - mark as failed
+        crate::serial::println!("[QUANTUM] Init circuit FAILED for handle={}", handle);
         slot.state.store(StateRaw::Failed as u32, Ordering::Relaxed);
         return;
     }
@@ -334,7 +341,9 @@ fn schedule_slot(idx: usize) {
     // NOW reserve qubits using the actual count from parsed circuit
     let n_qubits = slot.n_qubits.load(Ordering::Relaxed) as usize;
     let used = USED_QUBITS.load(Ordering::Relaxed);
+    crate::serial::println!("[QUANTUM] Reserving {} qubits (used={} max={})", n_qubits, used, MAX_QUBITS);
     if used + n_qubits > MAX_QUBITS {
+        crate::serial::println!("[QUANTUM] Not enough qubits!");
         slot.clear_circuit();
         return; // Not enough qubits
     }
@@ -343,6 +352,7 @@ fn schedule_slot(idx: usize) {
     CURRENT_RUNNING.store(handle, Ordering::Relaxed);
     LAST_SLOT.store(idx as u32, Ordering::Relaxed);
     slot.state.store(StateRaw::Running as u32, Ordering::Relaxed);
+    crate::serial::println!("[QUANTUM] Job {} now RUNNING", handle);
 }
 
 fn release_slot_qubits(slot: &JobSlot) {
@@ -433,17 +443,18 @@ pub fn shell_submit_bell() -> Option<u64> {
 
     // Built-in QASM2 Bell program
     const IR: &[u8] = b"OPENQASM 2.0;\ninclude \"qelib1.inc\";\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n";
+    const SHOTS: u32 = 1024;
 
     slot.handle.store(handle, Ordering::Relaxed);
     slot.state.store(StateRaw::Queued as u32, Ordering::Relaxed);
     slot.shots_done.store(0, Ordering::Relaxed);
-    slot.shots_total.store(1, Ordering::Relaxed); // 1 simulation batch
+    slot.shots_total.store(SHOTS, Ordering::Relaxed);
 
     slot.ir_len.store(IR.len() as u32, Ordering::Relaxed);
     slot.ir_hash.store(fnv1a64(IR), Ordering::Relaxed);
     slot.ir_format.store(qos_abi::shm::IRFMT_QASM2, Ordering::Relaxed);
     slot.n_qubits.store(2, Ordering::Relaxed);
-    slot.shots.store(1024, Ordering::Relaxed);
+    slot.shots.store(SHOTS, Ordering::Relaxed);
     slot.store_ir(IR);
 
     // Results will be computed by the simulator
@@ -465,7 +476,7 @@ pub fn shell_submit_ir_bell(shots: u32) -> Option<u64> {
     slot.handle.store(handle, Ordering::Relaxed);
     slot.state.store(StateRaw::Queued as u32, Ordering::Relaxed);
     slot.shots_done.store(0, Ordering::Relaxed);
-    slot.shots_total.store(1, Ordering::Relaxed); // 1 simulation batch
+    slot.shots_total.store(shots, Ordering::Relaxed);
 
     slot.ir_len.store(IR.len() as u32, Ordering::Relaxed);
     slot.ir_hash.store(fnv1a64(IR), Ordering::Relaxed);
@@ -531,11 +542,8 @@ pub fn shell_result(handle: u64) -> Result<(u64, u64), qos_abi::JobState> {
     let n00 = slot.res0.load(Ordering::Relaxed);
     let n11 = slot.res1.load(Ordering::Relaxed);
 
-    // Mimic ABI semantics: consuming result frees the slot.
-    slot.handle.store(0, Ordering::Relaxed);
-    slot.state.store(StateRaw::Free as u32, Ordering::Relaxed);
-    slot.shots_done.store(0, Ordering::Relaxed);
-    slot.shots_total.store(0, Ordering::Relaxed);
+    // Don't free the slot - user can call result/viz multiple times
+    // Use 'cancel' command to free the slot manually
 
     Ok((n00, n11))
 }
@@ -545,8 +553,14 @@ pub fn shell_cancel(handle: u64) -> bool {
         return false;
     };
     let slot = &JOBS[idx];
-    slot.state.store(StateRaw::Cancelled as u32, Ordering::Relaxed);
+    
+    // Free the slot completely
+    slot.handle.store(0, Ordering::Relaxed);
+    slot.state.store(StateRaw::Free as u32, Ordering::Relaxed);
     slot.shots_done.store(0, Ordering::Relaxed);
+    slot.shots_total.store(0, Ordering::Relaxed);
+    slot.res0.store(0, Ordering::Relaxed);
+    slot.res1.store(0, Ordering::Relaxed);
     slot.shots_total.store(0, Ordering::Relaxed);
     release_slot_qubits(slot);
     if CURRENT_RUNNING.load(Ordering::Relaxed) == handle {
@@ -566,13 +580,23 @@ pub fn on_timer_tick() {
 /// Process quantum work - MUST be called from main loop, NOT from interrupt handler!
 /// This does the actual quantum gate execution.
 pub fn process_quantum_work() {
+    static CALL_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let count = CALL_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    
     if !QUANTUM_WORK_PENDING.swap(false, Ordering::Relaxed) {
         return;
+    }
+    
+    if count < 3 {
+        crate::serial::println!("[QUANTUM] process_quantum_work() called, count={}", count);
     }
     
     let current = CURRENT_RUNNING.load(Ordering::Relaxed);
     if current == 0 {
         // Try to schedule a queued job
+        if count < 3 {
+            crate::serial::println!("[QUANTUM] No current job, calling maybe_schedule()");
+        }
         maybe_schedule();
         return;
     }
@@ -593,8 +617,13 @@ pub fn process_quantum_work() {
     let shots_done = slot.shots_done.load(Ordering::Relaxed);
     let shots_total = slot.shots_total.load(Ordering::Relaxed);
     
+    if count < 5 {
+        crate::serial::println!("[QUANTUM] Job {} progress: {}/{} shots", current, shots_done, shots_total);
+    }
+    
     if shots_done >= shots_total {
         // Job is complete
+        crate::serial::println!("[QUANTUM] Job {} COMPLETE ({} shots)", current, shots_done);
         slot.state.store(StateRaw::Done as u32, Ordering::Relaxed);
         release_slot_qubits(slot);
         CURRENT_RUNNING.store(0, Ordering::Relaxed);
@@ -631,11 +660,19 @@ pub fn process_quantum_work() {
                 let gates_executed = circ.step_n(qs, GATES_PER_TICK);
                 TOTAL_GATES_EXECUTED.fetch_add(gates_executed as u64, Ordering::Relaxed);
                 
+                if count < 10 {
+                    crate::serial::println!("[QUANTUM] Executed {} gates, circuit done={}", gates_executed, circ.is_done());
+                }
+                
                 // Check if this shot is complete (circuit finished)
                 if circ.is_done() {
                     // Sample the measurement outcome for this shot
                     let n_qubits = slot.n_qubits.load(Ordering::Relaxed) as usize;
                     let outcome = qs.sample_outcome_index();
+                    
+                    if count < 10 {
+                        crate::serial::println!("[QUANTUM] Shot complete, outcome={:b}", outcome);
+                    }
                     
                     // Update result counters (for 2-qubit Bell-like results)
                     // outcome is a bitstring represented as usize
@@ -710,11 +747,19 @@ pub enum SyscallNumber {
 
 // Simplified syscall handler without naked_asm
 pub extern "x86-interrupt" fn syscall_interrupt_handler(_stack_frame: InterruptStackFrame) {
-    let _n = SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+
+    // Process quantum work before handling syscall - allows jobs to progress during polling
+    process_quantum_work();
 
     #[cfg(feature = "userabi")]
     {
         handle_userdemo_abi();
+    }
+    
+    #[cfg(not(feature = "userabi"))]
+    {
+        crate::serial::println!("[SYSCALL] userabi feature not enabled!");
     }
 }
 
@@ -734,6 +779,87 @@ fn syscall_interrupt_handler_rust_unused(_saved_rsp: u64) -> u64 {
     {
         0
     }
+}
+
+// ── Register-based syscall ABI (Phase 2.2), vector int 0x81 ────────────────────────────────
+//
+// rax = syscall number, args in rdi/rsi/rdx/r10/r8/r9, return value in rax — the conventional
+// x86_64 layout. This complements the shared-memory ABI (int 0x80) used by the quantum demo;
+// the two coexist so the working shm path is untouched.
+
+/// Saved register frame, matching the push order in `asm_syscall_isr` (r15 lowest).
+#[repr(C)]
+struct SyscallRegs {
+    r15: u64, r14: u64, r13: u64, r12: u64, r11: u64, r10: u64,
+    r9: u64, r8: u64, rbp: u64, rdi: u64, rsi: u64, rdx: u64,
+    rcx: u64, rbx: u64, rax: u64,
+    // hardware iretq frame follows (rip, cs, rflags, rsp, ss) — not needed here.
+}
+
+pub const SYS_EXIT: u64 = 0;
+pub const SYS_WRITE: u64 = 1;
+pub const SYS_GETTICKS: u64 = 2;
+
+/// Validate that `[ptr, ptr+len)` is mapped in the active (process) address space. Used to
+/// stop a user process from making the kernel read unmapped/kernel memory via a syscall.
+fn user_ptr_ok(ptr: u64, len: usize) -> bool {
+    use x86_64::structures::paging::{Mapper, Page, Size4KiB};
+    use x86_64::VirtAddr;
+    if ptr == 0 || len == 0 || len > 4096 {
+        return false;
+    }
+    let Some(end) = ptr.checked_add((len - 1) as u64) else { return false };
+    let mut mapper = unsafe { crate::memory::init(crate::memory::phys_offset()) };
+    let mut page = Page::<Size4KiB>::containing_address(VirtAddr::new(ptr));
+    let last = Page::<Size4KiB>::containing_address(VirtAddr::new(end));
+    loop {
+        if mapper.translate_page(page).is_err() {
+            return false;
+        }
+        if page == last {
+            return true;
+        }
+        page = Page::containing_address(page.start_address() + 4096u64);
+    }
+}
+
+/// C callback for `asm_syscall_isr` (int 0x81). Reads the syscall number/args from the saved
+/// register frame, performs the call, and writes the result back into the saved `rax`. Returns
+/// the frame pointer unchanged (the asm restores from it and `iretq`s back to Ring 3).
+#[no_mangle]
+pub extern "C" fn syscall_dispatch(frame: u64) -> u64 {
+    SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
+    let regs = unsafe { &mut *(frame as *mut SyscallRegs) };
+    match regs.rax {
+        SYS_EXIT => {
+            if crate::kthread::is_user_current() {
+                crate::serial_println!("[regabi] SYS_EXIT -> process reaped; kernel survives");
+                crate::kthread::kill_current_and_park();
+            }
+            regs.rax = 0;
+        }
+        SYS_WRITE => {
+            let (ptr, len) = (regs.rdi, regs.rsi as usize);
+            if user_ptr_ok(ptr, len) {
+                let bytes = unsafe { core::slice::from_raw_parts(ptr as *const u8, len) };
+                for &b in bytes {
+                    crate::serial_print!("{}", b as char);
+                }
+                regs.rax = len as u64;
+            } else {
+                crate::serial_println!("[regabi] SYS_WRITE rejected (bad user ptr {:#x}+{})", ptr, len);
+                regs.rax = u64::MAX; // -1
+            }
+        }
+        SYS_GETTICKS => {
+            regs.rax = crate::interrupts::TICKS.load(Ordering::Relaxed);
+        }
+        other => {
+            crate::serial_println!("[regabi] unknown syscall {}", other);
+            regs.rax = u64::MAX;
+        }
+    }
+    frame
 }
 
 #[cfg(feature = "userabi")]
@@ -1241,17 +1367,45 @@ fn handle_userdemo_abi() -> u64 {
             #[cfg(not(feature = "verify"))]
             {
                 let code = unsafe { core::ptr::read_volatile(&call.arg0) };
+
+                // Preemptive path (Phase 2.1b): this process runs under the kthread scheduler.
+                // Reap only it and let the timer switch back to the shell / other processes.
+                if crate::kthread::is_user_current() {
+                    crate::serial_println!(
+                        "user exit: OP_EXIT (code={}) -> process reaped; kernel survives",
+                        code
+                    );
+                    crate::kthread::kill_current_and_park();
+                }
+
                 if crate::tasking::current_pid() != 0 {
                     // Scheduled process: terminate and switch back to shell without resetting.
                     let shell_rsp = crate::tasking::exit_current_and_switch_to_shell(code);
                     return shell_rsp;
                 }
 
-                // Legacy foreground exec path.
+                // Legacy foreground exec path
                 crate::process::exit_foreground(code);
-                // User module disabled - just switch to kernel CR3
                 crate::memory::switch_to_kernel_cr3();
-                crate::runtime::restart_kernel_loop("OP_EXIT");
+                
+                crate::serial::println!("user exit: OP_EXIT (code={}) -> exited, rebooting", code);
+                vga::println!("");
+                vga::println!("User program completed! Rebooting...");
+                vga::println!("");
+                
+                // Reboot the system to return to clean shell state
+                unsafe {
+                    // Keyboard controller reset
+                    core::arch::asm!("
+                        mov al, 0xFE
+                        out 0x64, al
+                    ", options(nostack, nomem));
+                }
+                
+                // Fallback: triple fault
+                loop {
+                    crate::arch::hlt();
+                }
             }
 
             0
@@ -1265,4 +1419,45 @@ fn handle_userdemo_abi() -> u64 {
             0
         }
     }
+}
+
+// ============================================================================
+// Public API for Visualization
+// ============================================================================
+
+pub use qos_abi::JobState;
+
+/// Get job information for visualization
+pub fn get_job_info(slot: usize) -> Option<JobInfo> {
+    if slot >= MAX_JOBS {
+        return None;
+    }
+    
+    let job = &JOBS[slot];
+    let state_raw = job.state_raw();
+    
+    if state_raw == StateRaw::Free {
+        return None;
+    }
+    
+    let circuit = job.circuit.lock();
+    let gates_total = circuit.as_ref().map(|c| c.len()).unwrap_or(0);
+    let gates_remaining = circuit.as_ref().map(|c| c.remaining()).unwrap_or(0);
+    drop(circuit);
+    
+    Some(JobInfo {
+        slot,
+        handle: job.handle.load(Ordering::Relaxed),
+        state: state_raw.as_job_state(),
+        gates_remaining,
+        gates_total,
+        shots_done: job.shots_done.load(Ordering::Relaxed),
+        shots_total: job.shots_total.load(Ordering::Relaxed),
+        n_qubits: job.n_qubits.load(Ordering::Relaxed),
+        ir_len: job.ir_len.load(Ordering::Relaxed),
+    })
+}
+
+pub const fn max_jobs() -> usize {
+    MAX_JOBS
 }

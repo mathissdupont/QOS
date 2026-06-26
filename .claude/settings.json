@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(xargs wc -l)",
+      "Read(//c/Users/samet/.claude/projects/c--Users-samet-OneDrive-Masa-st--QOS/memory/**)",
+      "Bash(cargo build *)",
+      "Bash(cargo test *)",
+      "Bash(cargo os-bootimage *)",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-gdesk.ps1\")",
+      "Read(//c/Users/samet/AppData/Local/Temp/qos-run/**)",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-qlab.ps1\")",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-qkbd.ps1\")",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-threads.ps1\")",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-threads2.ps1\")",
+      "Bash(cargo os-build *)",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-proc.ps1\")",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-fault.ps1\")",
+      "PowerShell(& \"C:\\\\Users\\\\samet\\\\AppData\\\\Local\\\\Temp\\\\claude\\\\c--Users-samet-OneDrive-Masa-st--QOS\\\\af9f01b0-3611-44de-9f1b-1453063308b9\\\\scratchpad\\\\verify-exit.ps1\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\samet\\.claude\\projects\\c--Users-samet-OneDrive-Masa-st--QOS\\memory"
+    ]
+  }
+}

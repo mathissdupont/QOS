@@ -7,6 +7,9 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: qaos-dev
+    ports:
+      # VNC Server for QEMU display
+      - "5900:5900"
     volumes:
       # Mount source code for live editing
       - .:/qaos
@@ -17,8 +20,6 @@ services:
     environment:
       # Display for QEMU GUI
       - DISPLAY=${DISPLAY:-:0}
-    # Enable GUI forwarding (X11)
-    network_mode: "host"
     stdin_open: true
     tty: true
 

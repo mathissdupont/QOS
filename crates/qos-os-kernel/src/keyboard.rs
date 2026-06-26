@@ -9,6 +9,12 @@ static SCANCODE_HEAD: AtomicUsize = AtomicUsize::new(0);
 static SCANCODE_TAIL: AtomicUsize = AtomicUsize::new(0);
 
 pub fn push_scancode(scancode: u8) {
+    // Also feed the unified input event queue (Phase 0.1), independent of the legacy buffer.
+    crate::input::push(crate::input::InputEvent::Key {
+        scancode,
+        pressed: scancode & 0x80 == 0,
+    });
+
     let head = SCANCODE_HEAD.load(Ordering::Relaxed);
     let next = (head + 1) % BUF_SIZE;
     let tail = SCANCODE_TAIL.load(Ordering::Acquire);

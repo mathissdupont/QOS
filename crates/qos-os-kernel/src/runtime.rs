@@ -1,9 +1,14 @@
 use crate::{arch, scheduler, serial, shell, syscall, ui, vga};
 
-const KERNEL_LOOP_STACK_SIZE: usize = 4096 * 8;
-static mut KERNEL_LOOP_STACK: [u8; KERNEL_LOOP_STACK_SIZE] = [0; KERNEL_LOOP_STACK_SIZE];
+const KERNEL_LOOP_STACK_SIZE: usize = 4096 * 32; // 128KB stack
+#[repr(align(16))]
+struct AlignedStack([u8; KERNEL_LOOP_STACK_SIZE]);
+static mut KERNEL_LOOP_STACK: AlignedStack = AlignedStack([0; KERNEL_LOOP_STACK_SIZE]);
 
 extern "C" fn kernel_loop_entry() -> ! {
+    serial::println!("[KERNEL_LOOP] Entry! Starting new scheduler...");
+    vga::println!("kernel restarting...");
+    
     // We may arrive here from an interrupt handler path with interrupts disabled.
     arch::enable_interrupts();
 
@@ -17,9 +22,11 @@ extern "C" fn kernel_loop_entry() -> ! {
     }
 
     let mut sched = scheduler::Scheduler::new();
+    serial::println!("[KERNEL_LOOP] Adding tasks...");
     sched.add_task(scheduler::HeartbeatTask::new(100));
     sched.add_task(ui::UiTask::new());
     sched.add_task(shell::ShellTask::new());
+    serial::println!("[KERNEL_LOOP] Tasks added, entering main loop");
 
     loop {
         // Process quantum work from main loop (NOT interrupt) to avoid deadlocks
@@ -48,7 +55,16 @@ pub fn restart_kernel_loop(reason: &'static str) -> ! {
     );
     vga::println!("user exited -> shell");
 
-    // Instead of complex asm, just call kernel_loop_entry directly
-    // This loses the stack switch but avoids the LLVM bug
-    kernel_loop_entry();
+    // Switch to dedicated kernel loop stack and restart
+    unsafe {
+        let stack_top = KERNEL_LOOP_STACK.0.as_ptr().add(KERNEL_LOOP_STACK_SIZE) as u64;
+        serial::println!("[RESTART] Switching to new stack at {:#x}", stack_top);
+        core::arch::asm!(
+            "mov rsp, {stack}",
+            "jmp {entry}",
+            stack = in(reg) stack_top,
+            entry = in(reg) kernel_loop_entry as usize,
+            options(noreturn)
+        );
+    }
 }
