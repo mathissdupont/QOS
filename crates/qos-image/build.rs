@@ -14,6 +14,14 @@ fn main() {
         .create_disk_image(&uefi)
         .expect("failed to create UEFI disk image");
 
+    // Copy the image to dist/ at build time so `cargo build -p qos-image` alone produces it
+    // (CI uploads dist/qos-uefi.img; no separate run step needed).
+    let manifest = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    let dist = manifest.join("../../dist");
+    let _ = std::fs::create_dir_all(&dist);
+    std::fs::copy(&uefi, dist.join("qos-uefi.img")).expect("failed to copy UEFI image to dist/");
+
     // Expose the image path to the binary via env!().
     println!("cargo:rustc-env=QOS_UEFI_IMAGE={}", uefi.display());
+    println!("cargo:rerun-if-changed=build.rs");
 }
