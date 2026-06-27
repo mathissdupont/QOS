@@ -1,7 +1,7 @@
 # QaOS - Quantum Operating System
 # Docker build environment (bypasses Windows LLVM alignment bug)
 
-FROM rust:1.85.0
+FROM rust:1.85.0-bookworm
 
 # Install dependencies
 RUN apt-get update && apt-get install -y \
@@ -22,11 +22,18 @@ RUN cargo install bootimage
 # Set working directory
 WORKDIR /qaos
 
-# Copy project files
-COPY . .
+# Copy only cargo files first for better caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/qos-os-kernel/Cargo.toml ./crates/qos-os-kernel/
+COPY crates/qos-abi/Cargo.toml ./crates/qos-abi/
+COPY crates/qos-core/Cargo.toml ./crates/qos-core/
+COPY crates/qos-os-xtask/Cargo.toml ./crates/qos-os-xtask/
+COPY crates/qos-userdemo/Cargo.toml ./crates/qos-userdemo/
+COPY crates/qosd/Cargo.toml ./crates/qosd/
+COPY crates/qos-pybridge/Cargo.toml ./crates/qos-pybridge/
 
-# Build the OS
-RUN cargo build -p os --target x86_64-unknown-none
+# Copy source files
+COPY . .
 
 # Default command: run QaOS in QEMU
 CMD ["cargo", "xtask", "run"]

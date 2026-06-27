@@ -6,14 +6,20 @@
 extern crate alloc;
 
 mod arch;
+mod asm_stubs;    // Low-level asm (global_asm!, no external cc required)
+mod framebuffer;  // VESA framebuffer graphics
 mod gdt;
 mod interrupts;
+mod input;       // Unified input event queue — Phase 0.1 (docs/PLAN.md)
+mod kthread;     // Preemptive kernel threads — Phase 2.1 (docs/PLAN.md)
+mod ipc;         // In-kernel pipe IPC — Phase 2.4 (docs/PLAN.md)
 mod keyboard;
 mod fs;
 mod memory;
 mod pit;
 mod process;
 mod quantum;
+mod qviz;        // Quantum visualization
 mod runtime;
 mod scheduler;
 mod qemu;
@@ -22,9 +28,10 @@ mod shell;
 mod splash;     // Boot splash screen
 mod syscall;
 mod tasking;
-// mod user; // Disabled due to LLVM asm bug "offset is not a multiple of 16"
+mod user; // ✅ ENABLED: LLVM bug fixed with Docker Linux environment
 mod ui;
 mod vga;
+mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
 
 mod allocator;
 mod ata;
@@ -42,28 +49,49 @@ mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod e1000;      // Intel E1000 NIC driver
 mod http;       // HTTP/HTTPS client
-mod gui;        // Window manager & GUI
+mod gui;        // Window manager & GUI (text mode)
+mod gfxui;      // Interactive graphical desktop (Mode 13h) — Phase 1 (docs/PLAN.md)
 mod timer;      // Timer utilities
 mod mouse;      // PS/2 Mouse driver
 mod menu;       // Text-mode menu system
 mod dialog;     // Dialog boxes
 mod explorer;   // File explorer
+mod desktop;    // Windows-style desktop environment
+mod desktop_apps; // Desktop applications
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
+use bootloader_api::config::Mapping;
 
-entry_point!(kernel_main);
+// Bootloader config (bootloader 0.11): request a dynamic physical-memory mapping so the kernel
+// gets `physical_memory_offset`, and give the kernel a generous stack.
+pub static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 256 * 1024; // 256 KiB
+    config
+};
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::init();
 
     serial::println!("QOS-OS boot OK (serial)");
+
+    // Initialize framebuffer (placeholder for bootloader 0.9.x)
+    framebuffer::init();
 
     // Show boot splash screen (skip delay in verify mode)
     splash::show_splash();
     splash::show_progress("Initializing memory...");
 
-    let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
-    unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_map) };
+    let phys_mem_offset = x86_64::VirtAddr::new(
+        boot_info
+            .physical_memory_offset
+            .into_option()
+            .expect("bootloader did not provide a physical memory offset"),
+    );
+    unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_regions) };
     memory::with_ctx(|mapper, frame_allocator| {
         allocator::init_heap(mapper, frame_allocator).expect("heap init failed")
     });
@@ -96,7 +124,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     }
     
     gui::init();          // Window manager
-    
+
+    fs::seed_demo();      // Seed a small demo tree for `ls` and the GUI File Manager
+
     // Initialize menu system
     let menu_bar = menu::create_default_menu();
     menu::init(menu_bar);

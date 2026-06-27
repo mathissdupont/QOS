@@ -22,7 +22,15 @@ impl Scheduler {
     }
 
     pub fn step(&mut self) {
-        for task in self.tasks.iter_mut() {
+        static STEP_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let count = STEP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if count == 0 {
+            crate::serial::println!("[SCHEDULER] First step, {} tasks", self.tasks.len());
+        }
+        for (i, task) in self.tasks.iter_mut().enumerate() {
+            if count == 0 {
+                crate::serial::println!("[SCHEDULER] Calling task {}", i);
+            }
             task.step();
         }
     }

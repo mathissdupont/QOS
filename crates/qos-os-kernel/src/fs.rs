@@ -500,6 +500,17 @@ lazy_static! {
     static ref FS: Mutex<RamFs> = Mutex::new(RamFs::new());
 }
 
+/// Seed a small demo tree so the shell (`ls`) and the GUI File Manager show real content on a
+/// fresh boot. Idempotent-ish: safe to call once at startup.
+pub fn seed_demo() {
+    let mut fs = FS.lock();
+    let _ = fs.mkdir(b"quantum");
+    let _ = fs.mkdir(b"bin");
+    let _ = fs.write(b"readme.txt", b"Welcome to QOS - a quantum-ready operating system.\n");
+    let _ = fs.write(b"quantum/bell.qasm", b"OPENQASM 2.0;\nqreg q[2];\nh q[0];\ncx q[0],q[1];\n");
+    let _ = fs.write(b"quantum/ghz.qasm", b"OPENQASM 2.0;\nqreg q[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\n");
+}
+
 pub fn list() {
     FS.lock().list_dir(b"");
 }

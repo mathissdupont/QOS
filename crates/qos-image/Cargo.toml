@@ -1,0 +1,13 @@
+[package]
+name = "qos-image"
+version = "0.1.0"
+edition = "2021"
+description = "Builds bootable BIOS + UEFI disk images for the QOS kernel (bootloader 0.11)."
+
+[dependencies]
+
+[build-dependencies]
+bootloader = "0.11"
+# Artifact dependency: cargo compiles the kernel ELF for the bare-metal target and exposes its
+# path via CARGO_BIN_FILE_OS_os (requires `[unstable] bindeps = true`).
+os = { path = "../qos-os-kernel", artifact = "bin", target = "x86_64-unknown-none" }
