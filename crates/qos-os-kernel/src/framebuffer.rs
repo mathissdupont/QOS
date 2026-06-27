@@ -4,9 +4,19 @@
 //! Note: Bootloader 0.9.x doesn't expose framebuffer, so this is a placeholder for future upgrade.
 
 use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
 use spin::Mutex;
 
 static FRAMEBUFFER: Mutex<Option<FrameBufferWrapper>> = Mutex::new(None);
+
+/// True once a real (bootloader-provided) linear framebuffer is installed. While active, the
+/// text console and all VGA-text output route here instead of the legacy 0xb8000 buffer (which
+/// is unmapped under UEFI).
+static ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn active() -> bool {
+    ACTIVE.load(Ordering::Relaxed)
+}
 
 struct FrameBufferWrapper {
     buffer: &'static mut [u8],
@@ -21,12 +31,54 @@ pub struct FrameBufferInfo {
     pub bytes_per_pixel: usize,
 }
 
-/// Initialize the framebuffer (placeholder - bootloader 0.9.x doesn't support this)
-pub fn init() {
-    // Bootloader 0.9.x doesn't expose framebuffer
-    // TODO: Upgrade to bootloader 0.11+ for framebuffer support
-    crate::serial_println!("[FB] Framebuffer not available in bootloader 0.9.x");
-    crate::serial_println!("[FB] Using VGA text mode instead");
+/// Legacy no-op (kept for callers); the real init is `init_from_bootloader`.
+pub fn init() {}
+
+/// Install the bootloader-provided linear framebuffer (bootloader 0.11). `stride_bytes` is the
+/// number of bytes per scanline. The framebuffer memory is provided by the bootloader and lives
+/// for the lifetime of the kernel, so building a `'static` slice from its pointer is sound.
+pub fn init_from_bootloader(
+    ptr: *mut u8,
+    len: usize,
+    width: usize,
+    height: usize,
+    stride_bytes: usize,
+    bytes_per_pixel: usize,
+) {
+    let buffer = unsafe { core::slice::from_raw_parts_mut(ptr, len) };
+    let info = FrameBufferInfo { width, height, stride: stride_bytes, bytes_per_pixel };
+    *FRAMEBUFFER.lock() = Some(FrameBufferWrapper { buffer, info });
+    ACTIVE.store(true, Ordering::Relaxed);
+    clear(colors::BLACK);
+    reset_cursor();
+    crate::serial_println!(
+        "[FB] framebuffer console active: {}x{} stride={}B bpp={}",
+        width, height, stride_bytes, bytes_per_pixel
+    );
+}
+
+/// Scroll the whole framebuffer up by `px` pixel-rows, clearing the freed rows at the bottom.
+pub fn scroll_up(px: usize) {
+    let mut g = FRAMEBUFFER.lock();
+    if let Some(ref mut fb) = *g {
+        let row_bytes = fb.info.stride;
+        let shift = px * row_bytes;
+        let total = fb.info.height * row_bytes;
+        let total = core::cmp::min(total, fb.buffer.len());
+        if shift < total {
+            fb.buffer.copy_within(shift..total, 0);
+            for b in &mut fb.buffer[(total - shift)..total] {
+                *b = 0;
+            }
+        }
+    }
+}
+
+/// Reset the text console cursor to the top-left.
+pub fn reset_cursor() {
+    let mut w = FB_WRITER.lock();
+    w.x = 0;
+    w.y = 0;
 }
 
 /// Get framebuffer info
@@ -193,10 +245,10 @@ impl FrameBufferWriter {
                 }
             }
             
-            // Scroll if needed
+            // Scroll up by one text line when the cursor passes the bottom.
             if self.y + 8 > info.height {
-                self.y = 0;
-                clear(self.bg);
+                scroll_up(8);
+                self.y = info.height - 8;
             }
         }
     }

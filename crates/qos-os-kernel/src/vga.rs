@@ -257,6 +257,11 @@ lazy_static! {
 }
 
 pub fn clear_screen() {
+    if crate::framebuffer::active() {
+        crate::framebuffer::clear(0x0000_00);
+        crate::framebuffer::reset_cursor();
+        return;
+    }
     let mut w = WRITER.lock();
     for row in 0..BUFFER_HEIGHT {
         w.clear_row(row);
@@ -305,6 +310,9 @@ pub fn output_region_bounds() -> (usize, usize) {
 }
 
 fn write_row_direct(row: usize, bytes: &[u8; BUFFER_WIDTH], fg: Color, bg: Color) {
+    if crate::framebuffer::active() {
+        return; // scrollback viewport is VGA-text only; the fb console handles output
+    }
     if row >= BUFFER_HEIGHT {
         return;
     }
@@ -326,6 +334,9 @@ fn write_row_direct(row: usize, bytes: &[u8; BUFFER_WIDTH], fg: Color, bg: Color
 }
 
 fn render_viewport() {
+    if crate::framebuffer::active() {
+        return;
+    }
     let (top, bottom) = output_region_bounds();
     if bottom < top {
         return;
@@ -400,6 +411,12 @@ pub fn scroll_down_lines(n: usize) {
 }
 
 pub fn clear_row(row: usize, fg: Color, bg: Color) {
+    if crate::framebuffer::active() {
+        if let Some(i) = crate::framebuffer::info() {
+            crate::framebuffer::fill_rect(0, row * 8, i.width, 8, color_to_rgb(bg));
+        }
+        return;
+    }
     if row >= BUFFER_HEIGHT {
         return;
     }
@@ -410,7 +427,33 @@ pub fn clear_row(row: usize, fg: Color, bg: Color) {
     w.color_code = prev;
 }
 
+/// Map a VGA text color to a 0xRRGGBB value for the framebuffer console.
+fn color_to_rgb(c: Color) -> u32 {
+    match c {
+        Color::Black => 0x0000_00,
+        Color::Blue => 0x0000_AA,
+        Color::Green => 0x00AA_00,
+        Color::Cyan => 0x00AA_AA,
+        Color::Red => 0xAA00_00,
+        Color::Magenta => 0xAA00_AA,
+        Color::Brown => 0xAA55_00,
+        Color::LightGray => 0xAAAA_AA,
+        Color::DarkGray => 0x5555_55,
+        Color::LightBlue => 0x5555_FF,
+        Color::LightGreen => 0x55FF_55,
+        Color::LightCyan => 0x55FF_FF,
+        Color::LightRed => 0xFF55_55,
+        Color::Pink => 0xFF55_FF,
+        Color::Yellow => 0xFFFF_55,
+        Color::White => 0xFFFF_FF,
+    }
+}
+
 pub fn write_at(row: usize, col: usize, s: &str, fg: Color, bg: Color) {
+    if crate::framebuffer::active() {
+        crate::framebuffer::draw_string(col * 8, row * 8, s, color_to_rgb(fg), color_to_rgb(bg));
+        return;
+    }
     if row >= BUFFER_HEIGHT || col >= BUFFER_WIDTH {
         return;
     }
@@ -437,6 +480,13 @@ pub fn write_at(row: usize, col: usize, s: &str, fg: Color, bg: Color) {
 
 pub fn _print(args: fmt::Arguments) {
     use fmt::Write;
+
+    // Under a real framebuffer (e.g. UEFI), route text to the framebuffer console; the legacy
+    // 0xb8000 text buffer is unmapped there.
+    if crate::framebuffer::active() && !CAPTURE_ACTIVE.load(Ordering::Relaxed) {
+        crate::framebuffer::_print(args);
+        return;
+    }
 
     // Check if we're in capture mode
     if CAPTURE_ACTIVE.load(Ordering::Relaxed) {

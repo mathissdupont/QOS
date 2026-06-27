@@ -78,8 +78,21 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial::println!("QOS-OS boot OK (serial)");
 
-    // Initialize framebuffer (placeholder for bootloader 0.9.x)
-    framebuffer::init();
+    // Install the bootloader-provided linear framebuffer (UEFI/VESA). While active, all text
+    // output routes to it — the legacy 0xb8000 VGA text buffer is unmapped under UEFI.
+    if let Some(fb) = boot_info.framebuffer.as_mut() {
+        let info = fb.info();
+        let buf = fb.buffer_mut();
+        let (ptr, len) = (buf.as_mut_ptr(), buf.len());
+        framebuffer::init_from_bootloader(
+            ptr,
+            len,
+            info.width,
+            info.height,
+            info.stride * info.bytes_per_pixel,
+            info.bytes_per_pixel,
+        );
+    }
 
     // Show boot splash screen (skip delay in verify mode)
     splash::show_splash();
