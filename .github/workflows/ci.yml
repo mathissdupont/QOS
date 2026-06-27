@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-and-test:
+    name: Build kernel + test core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the nightly + rust-src + llvm-tools-preview + the bare-metal
+      # target, so rustup installs the right toolchain automatically.
+      - name: Show toolchain
+        run: rustup show
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Test portable core (qos-core)
+        run: cargo test -p qos-core --features std
+
+      - name: Build bare-metal kernel
+        run: cargo os-build
+
+      - name: Install cargo-bootimage
+        run: cargo install bootimage --locked || cargo install bootimage
+
+      - name: Build bootable image
+        run: cargo os-bootimage
+        continue-on-error: true
+
+  smoke-test:
+    name: Headless QEMU smoke test (best-effort)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Show toolchain
+        run: rustup show
+      - name: Install QEMU + bootimage
+        run: |
+          sudo apt-get update && sudo apt-get install -y qemu-system-x86
+          cargo install bootimage --locked || cargo install bootimage
+      - name: Boot + run the Ring-3 quantum verify demo
+        run: |
+          cargo bootimage -p os --target x86_64-unknown-none --features "userdemo,verify" -Zbuild-std=core,alloc
+          # verify feature exits QEMU via isa-debug-exit; treat the conventional exit code as success.
+          timeout 120 qemu-system-x86_64 \
+            -drive format=raw,file=target/x86_64-unknown-none/debug/bootimage-os.bin \
+            -device isa-debug-exit,iobase=0xf4,iosize=0x04 \
+            -display none -serial stdio --no-reboot -m 256M; \
+          code=$?; echo "QEMU exit code: $code"; \
+          # 33 == (0x10<<1)|1 from the verify success path; 124 == timeout.
+          test "$code" = "33" || test "$code" = "0"

@@ -78,30 +78,82 @@ These are the load-bearing pillars. Without them it is a kernel demo, not an OS.
 
 *Ship:* a desktop you can actually point-and-click — the first "Windows-like" feel.
 
-### Phase 2 — Real-OS core (the hard, essential part; parallelizable)
+### Phase 2 — Real-OS core ✅ DONE (verified in QEMU)
 
-- **2.1 Preemptive scheduler + context switch** on the timer interrupt.
-- **2.2 Reliable Ring 3** + a solid syscall ABI (build on `user.rs`/`asm_iretq_to_user`).
-- **2.3 Per-process page tables** + basic memory protection.
-- **2.4 Process lifecycle** (spawn/exit/wait) + one IPC primitive.
+- **2.1 Preemptive scheduler + context switch** on the timer interrupt. ✅
+  `kthread.rs` + `asm_timer_isr` (global_asm, sidesteps the LLVM naked-asm bug). `threadtest`.
+- **2.2 Reliable Ring 3 + solid syscall ABI**. ✅
+  New register-based ABI on `int 0x81` (`asm_syscall_isr` + `syscall_dispatch`: rax=number,
+  rdi/rsi args, return in rax, with user-pointer validation), coexisting with the `int 0x80`
+  shared-memory ABI. `regabitest`.
+- **2.3 Per-process page tables + memory protection**. ✅
+  Per-process CR3 (lock-free switch), W^X (code demoted to read-execute after load), NX data,
+  implicit stack guard page. `proctest`, `wxtest`.
+- **2.4 Process lifecycle + IPC**. ✅
+  spawn / exit (clean via syscall) / fault-kill (only the offending process dies) / wait;
+  in-kernel pipe IPC (`ipc.rs`). `exittest`, `faulttest`, `ipctest`.
 
-*Ship:* a user-space program runs isolated in Ring 3, preempted, and a crash kills only it.
+*Shipped:* a user-space program runs isolated in Ring 3, is preempted, and a crash/runaway/W^X
+violation kills only it — the kernel and other processes survive.
 
-### Phase 3 — Make it useful
+*Optional polish (deferred, no new capability):* migrate the legacy `exec`/`udemo` commands to
+launch through the `kthread` engine (they currently use the original direct-`iretq` path).
 
-- **3.1 Verify & harden the filesystem** (disk persistence, directories, metadata).
-- **3.2 Verify networking** (ping/DNS round-trips); wire **`qosd` TLS proxy** for real cloud QPU.
-- **3.3 GUI apps**: file manager + the **quantum circuit editor / job monitor** (our hook).
-- **3.4 Kernel cutover**: kernel uses `qos-core` `JobManager` + QHAL (retire the 16-slot array).
+### Phase 3 — Real, visible GUI (current focus)
 
-### Phase 4 — Long tail
+- **3.1 Live, multi-window desktop**: surface Phase-2 preemption in the GUI — a background task
+  indicator (live counter) + clock in the taskbar; multiple windows/apps open at once; window
+  focus/z-order. The "Windows-like" feel.
+- **3.2 Higher resolution (VESA)**: move from VGA Mode 13h (320×200×256) to a bootloader-0.11+
+  VESA linear framebuffer (640×480+ truecolor). See ADR-0013 Phase 2. (Bootloader upgrade —
+  scoped carefully; keep Mode 13h working as fallback.)
+- **3.3 More apps**: a file manager (on the existing FS), a process/task monitor (shows the
+  Phase-2 processes), a terminal window, alongside the Quantum Lab (circuit editor / job
+  monitor — our quantum hook).
+- **3.4 Filesystem & networking verify/harden**; wire the **`qosd` TLS proxy** for real cloud
+  QPU; kernel cutover to `qos-core` `JobManager` + QHAL.
 
-Multi-user/login, permissions enforcement, clipboard, settings, audio, USB, package manager.
+*Ship:* a usable, good-looking desktop with several real apps.
+
+### Phase 4 — Runs on all computers (real-hardware portability)
+
+Goal: boot and run on real PCs and common VMs, not just QEMU.
+
+- **4.1 Boot portability**: produce a bootable USB/ISO image; verify on UEFI (via CSM/legacy and
+  a UEFI path) and BIOS; test under VirtualBox/VMware/Hyper-V and at least one physical machine.
+- **4.2 Hardware probing & graceful fallback**: detect RAM, CPU features, storage (AHCI/IDE),
+  NIC, and input; degrade gracefully when a device is absent (e.g. no PS/2 mouse, USB-only).
+- **4.3 Timing & APIC**: don't assume a fixed PIT/PIC; support APIC/HPET where present, calibrate
+  the timer, and avoid QEMU-specific assumptions.
+- **4.4 Robust display init**: query available VESA/EDID modes; pick a safe default; fall back to
+  Mode 13h/text when needed.
+
+*Ship:* a USB/ISO that boots to the desktop on common machines and VMs.
+
+### Phase 5 — Open-source / GitHub contribution readiness
+
+Prepare the repo so others can understand, build, and contribute.
+
+- **5.1 Docs**: a strong `README.md` (what QOS is, screenshots, quick start, the `run-qos.ps1`
+  flow), architecture overview linking the ADRs, and a build matrix (Windows local, Docker).
+- **5.2 Contribution scaffolding**: `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, a `LICENSE`
+  (review third-party/dependency licenses — bootloader, x86_64, etc.), issue/PR templates,
+  and `CODEOWNERS`.
+- **5.3 CI**: GitHub Actions that build the kernel + boot image and run `cargo test` for
+  `qos-core`; a headless QEMU smoke test (boot → run a verify command → exit code).
+- **5.4 Project hygiene**: `.gitignore` review, label scheme, a "good first issue" set, a
+  roadmap/ROADMAP sync, and a tagged release with the bootable image attached.
+
+*Ship:* a newcomer can clone, read, build, run, and open a meaningful PR.
+
+### Phase 6 — Long tail
+
+Multi-user/login, permissions enforcement, clipboard, settings, audio, USB stack, package
+manager.
 
 ---
 
-## Suggested starting point
+## Status
 
-**Phase 0.1 (unified input event queue).** It is the shared prerequisite for the interactive
-GUI (Phase 1) *and* clean program input later, and it is small and verifiable. From there,
-Phase 1 makes the desktop clickable while Phase 2 (the real-OS core) proceeds in parallel.
+Phases 0, 1, and 2 are complete and verified in QEMU. Current focus: **Phase 3** (visible GUI),
+then **Phase 4** (real-hardware portability), then **Phase 5** (open-source readiness).

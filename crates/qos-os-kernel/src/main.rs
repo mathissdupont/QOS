@@ -12,6 +12,7 @@ mod gdt;
 mod interrupts;
 mod input;       // Unified input event queue — Phase 0.1 (docs/PLAN.md)
 mod kthread;     // Preemptive kernel threads — Phase 2.1 (docs/PLAN.md)
+mod ipc;         // In-kernel pipe IPC — Phase 2.4 (docs/PLAN.md)
 mod keyboard;
 mod fs;
 mod memory;
@@ -108,7 +109,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     }
     
     gui::init();          // Window manager
-    
+
+    fs::seed_demo();      // Seed a small demo tree for `ls` and the GUI File Manager
+
     // Initialize menu system
     let menu_bar = menu::create_default_menu();
     menu::init(menu_bar);

@@ -1,69 +1,120 @@
+# QOS — Quantum Operating System
 
-# QOS
+QOS is a bare-metal, `no_std` operating system written in Rust for the x86_64 architecture. It
+pairs a small, modern OS kernel with a first-class **quantum control plane**: the long-term goal
+is an OS that is a usable, Windows-like desktop *and* the classical control plane for quantum
+workloads (local simulation today, cloud QPUs and a future QPU accelerator over time).
 
-Usage guide: see [docs/USAGE.md](docs/USAGE.md).
+> Status: actively developed. The kernel boots, preemptively multitasks isolated user processes,
+> and presents an interactive graphical desktop. See [docs/PLAN.md](docs/PLAN.md) for the roadmap
+> and [docs/adr/](docs/adr/) for the architecture decisions.
 
-This repo contains a Rust bare-metal kernel (`crates/qos-os-kernel`, package name: `os`) plus supporting crates.
+## Screenshots
 
-## Kernel (QEMU)
+| Desktop | Quantum Lab | Multi-window |
+|---|---|---|
+| ![desktop](docs/screenshots/desktop.png) | ![quantum lab](docs/screenshots/quantum-lab.png) | ![multi-window](docs/screenshots/multi-window.png) |
 
-The kernel is `no_std`, so you must build it for the bare-metal target:
+The taskbar shows a live background-task counter and clock — a real preemptive kernel thread
+running behind the GUI. The Quantum Lab runs a Bell-state circuit on the in-kernel statevector
+simulator and plots the measurement histogram.
 
-- Build bootable image:
-	- `cargo os-bootimage`
-	- (equivalent) `cargo bootimage -p os --target x86_64-unknown-none`
+## Highlights
 
-- Run in QEMU:
-	- `cargo os-run`
-	- (equivalent) `cargo run -p os --target x86_64-unknown-none`
+- **Preemptive multitasking** — timer-driven context switching for kernel threads and Ring-3
+  user processes.
+- **Process isolation** — per-process page tables, W^X memory protection, and fault isolation: a
+  crashing or runaway user process is killed without taking down the kernel or other processes.
+- **Two syscall ABIs** — a register-based ABI (`int 0x81`: `rax`=number, `rdi`/`rsi`=args) and a
+  shared-memory ABI (`int 0x80`) used by the quantum demo.
+- **Graphical desktop** — VGA Mode 13h framebuffer, mouse cursor, draggable/closable windows,
+  buttons and menus, a Start menu, and apps (Quantum Lab, Task Monitor, About, Files).
+- **In-kernel quantum simulator** — a real statevector simulator with an OpenQASM subset and a
+  Quantum Hardware Abstraction Layer (QHAL) designed for future cloud/QPU backends.
+- **IPC** — an in-kernel pipe primitive.
 
-### Ring3 Quantum Demo (syscalls)
+## Quick start (Windows + QEMU)
 
-The kernel includes a minimal Ring3 demo that uses `int 0x80` + a shared-memory ABI to:
+Prerequisites: the pinned Rust toolchain (installed automatically from `rust-toolchain.toml`),
+[`cargo-bootimage`](https://github.com/rust-osdev/bootimage), and
+[QEMU](https://www.qemu.org/) (`qemu-system-x86_64`).
 
-- Submit a tiny “Bell” job
-- Query status
-- Fetch deterministic result counts (512/512)
-- Exit QEMU via `isa-debug-exit`
+```powershell
+cargo install bootimage      # one-time
+./run-qos.ps1 -Build         # build the boot image and launch QEMU
+```
 
-Run it:
+`run-qos.ps1` handles two Windows gotchas automatically: it finds QEMU even when it is not on
+`PATH`, and it copies the boot image to an ASCII-only temp path (non-ASCII repo paths corrupt
+QEMU's arguments). Add `-Serial` to mirror the guest serial log in your terminal.
 
-- `cargo os-run --features "userdemo,verify"`
+At the shell prompt, type `gdesk` for the graphical desktop. **Click inside the QEMU window to
+capture the mouse** (a relative PS/2 mouse only moves once captured; `Ctrl+Alt+G` releases it).
 
-## Verification
+### Try the OS-core demos
 
-- `cargo os-verify`
+From the shell (or run with `./run-qos.ps1 -Build -Serial` to watch the output):
 
-`os-verify` builds/runs the kernel with `--features verify,userdemo` and asserts log markers for the Ring3 syscall quantum demo.
+| Command | What it demonstrates |
+|---|---|
+| `gdesk` | Graphical desktop (Q = Quantum Lab, R = run, M = Task Monitor, A = About, F = Files, ESC = exit) |
+| `threadtest` | Preemptive context switching between two kernel threads |
+| `proctest` | Two isolated Ring-3 processes preempted concurrently |
+| `faulttest` | A crashing process is killed; the kernel and other processes survive |
+| `exittest` | A process exits cleanly via syscall and control returns to the shell |
+| `regabitest` | The register-based syscall ABI (`int 0x81`) |
+| `wxtest` | W^X enforcement (a write to a code page faults) |
+| `ipctest` | A producer/consumer pair over a kernel pipe |
 
-## Hosted UI (recommended for day-to-day development)
+## Build & verify (cross-platform)
 
-Run the server and open the web UI:
+```sh
+# Run the portable control-plane core's tests (host target)
+cargo test -p qos-core --features std
 
-- PowerShell: `./run-qosd.ps1`
-- Then open: http://127.0.0.1:8080/
+# Build the bare-metal kernel
+cargo os-build              # = cargo build -p os --target x86_64-unknown-none -Zbuild-std=core,alloc
 
-By default, `qosd` uses a pure-Rust **stub simulator backend** so it builds/runs on a fresh Windows machine without needing Python.
+# Build a bootable image
+cargo os-bootimage          # = cargo bootimage -p os --target x86_64-unknown-none
 
-To use the Python simulator backend (requires Python/venv):
+# Headless verification (boots, runs the Ring-3 quantum demo, exits with a status code)
+cargo os-verify
+```
 
-- `cargo run -p qosd --features python`
+A Docker-based build is also available (see `Dockerfile` / `docker-compose.yml`) for a clean,
+reproducible Linux toolchain.
 
-This path lets you iterate on `qos-core`/`qosd` quickly on Windows, then later port the same API/logic into the kernel/userland.
+## Running on real hardware and VMs
 
-## ABI RPC (kernel/userland wire model on host)
+QOS boots via legacy BIOS and can run in VirtualBox/VMware or from a USB stick (with Legacy/CSM
+enabled). See [docs/HARDWARE.md](docs/HARDWARE.md) for the support matrix, disk-image formats
+(`dist/qos.vdi` / `.vmdk` / `.img`), and current limitations (UEFI is planned, not yet supported).
 
-`qosd` also exposes a single RPC endpoint that accepts/returns `qos-abi` JSON:
+## Architecture
 
-- POST `http://127.0.0.1:8080/abi`
+- `crates/qos-os-kernel` (package `os`) — the bare-metal kernel: scheduler, paging, interrupts,
+  drivers, the graphical desktop, and the in-kernel quantum simulator.
+- `crates/qos-core` — a portable (`no_std + alloc`, optional `std`) control-plane core:
+  `JobManager`, scheduler, event log, and the Quantum Hardware Abstraction Layer (QHAL).
+- `crates/qos-abi` — shared ABI types (job handles, process specs, result status).
 
-Example (PowerShell):
+Design decisions are recorded as Architecture Decision Records in [docs/adr/](docs/adr/). Start
+with ADR-0002 (QPU control-plane framing) and ADR-0003 (layered architecture).
 
-- Submit:
-	- `$req = @{ Submit = @{ proc = @{ name='bell'; ir_format='OpenQasm3'; ir_bytes=@(79,80,69,78,81,65,83,77,32,51,59); n_qubits=2; shots=100 } } } | ConvertTo-Json -Depth 8`
-	- `Invoke-RestMethod http://127.0.0.1:8080/abi -Method Post -ContentType 'application/json' -Body $req`
+## Contributing
 
-## Notes
+Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and
+[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). All repository content is in English.
 
-- `cargo bootimage -p os` **without** `--target x86_64-unknown-none` will try to build for the host target and fail.
+## License
 
+QOS is licensed under the **PolyForm Noncommercial License 1.0.0** — a source-available license
+that permits use, modification, and distribution for **noncommercial purposes only**. Commercial
+use is not permitted under this license. See [LICENSE](LICENSE) for the full terms; for commercial
+licensing, contact **contact@heptapusgroup.com**.
+
+Note: this is a *source-available* license, not an OSI-approved open-source license. The project's
+dependencies (e.g. `bootloader`, `x86_64`, `spin`) are permissively licensed (MIT / Apache-2.0),
+which is compatible with QOS adopting a more restrictive license. Licensing questions are best
+confirmed with a legal review.

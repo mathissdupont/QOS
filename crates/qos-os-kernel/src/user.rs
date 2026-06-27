@@ -441,6 +441,20 @@ pub fn spawn_ring3_faulter() -> Ring3Handle {
     spawn_ring3(FAULT_PROG)
 }
 
+/// Ring-3 payload that attempts to write to its own (now read-execute) code page — a W^X
+/// violation that must fault. Proves the W^X protection from Phase 2.3.
+#[rustfmt::skip]
+const WX_PROG: &[u8] = &[
+    // mov byte ptr [0x40000000], 0x90    ; write into the read-only code page -> #PF
+    0xC6, 0x04, 0x25, 0x00, 0x00, 0x00, 0x40, 0x90,
+    0xEB, 0xFE,                            // jmp $ (unreached)
+];
+
+/// Build a Ring-3 process that violates W^X by writing to its code page. Used by `wxtest`.
+pub fn spawn_ring3_wxviolator() -> Ring3Handle {
+    spawn_ring3(WX_PROG)
+}
+
 /// Build a Ring-3 process that busy-loops then exits cleanly via OP_EXIT. Used by `exittest`.
 pub fn spawn_ring3_exiter() -> Ring3Handle {
     spawn_ring3(EXIT_PROG)
@@ -496,6 +510,17 @@ fn spawn_ring3(payload: &[u8]) -> Ring3Handle {
             core::ptr::copy_nonoverlapping(payload.as_ptr(), dst, payload.len());
         }
         memory::switch_cr3(saved);
+
+        // W^X (Phase 2.3): after loading, demote the code page to read-execute (drop WRITABLE).
+        // A process that tries to modify its own code now faults instead of self-modifying.
+        // (The stack and ABI pages stay NX data; the page just below the stack is left unmapped
+        // as an implicit guard page so a stack overflow faults rather than corrupting memory.)
+        unsafe {
+            let rx = PageTableFlags::PRESENT | PageTableFlags::USER_ACCESSIBLE;
+            if let Ok(flush) = um.update_flags(code_page, rx) {
+                flush.flush();
+            }
+        }
 
         // Allocate a kernel stack and build the iretq-to-Ring3 frame on it (same layout as
         // tasking::spawn_user_process and the asm timer ISR's save/restore).

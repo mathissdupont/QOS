@@ -348,39 +348,141 @@ fn draw_pct(x: usize, y: usize, pct: i32) {
     vga13h::draw_string(x, y, text, color::BLACK, color::LTGRAY);
 }
 
-// ── Welcome window ──────────────────────────────────────────────────────────────────────
-
-fn draw_welcome(win: &Window) {
-    use color::*;
-    if !win.open {
-        return;
-    }
-    win.draw_frame();
-    let (bx, by) = win.body_origin();
-    vga13h::draw_string(bx as usize, by as usize, "Welcome to QOS.", BLACK, LTGRAY);
-    vga13h::draw_string(bx as usize, by as usize + 12, "Click Start, or press", BLACK, LTGRAY);
-    vga13h::draw_string(bx as usize, by as usize + 24, "Q for Quantum Lab.", BLACK, LTGRAY);
-    vga13h::draw_string(bx as usize, by as usize + 40, "Drag the title bar.", DKGRAY, LTGRAY);
-    vga13h::draw_string(bx as usize, by as usize + 52, "[x] closes a window.", DKGRAY, LTGRAY);
-}
-
 // ── Desktop composition ─────────────────────────────────────────────────────────────────
 
 const START_BTN: Button = Button { x: 2, y: (H as i32) - 12, w: 50, h: 10, label: "Start" };
 
-const MENU_ITEMS: [&str; 3] = ["Quantum Lab", "Welcome", "Exit"];
+const MENU_ITEMS: [&str; 5] = ["Quantum Lab", "Files", "Task Monitor", "About", "Exit"];
 
 fn start_menu() -> Menu {
     let items: &'static [&'static str] = &MENU_ITEMS;
-    let m_w = 96;
+    let m_w = 108;
     let m = Menu { x: 2, y: 0, w: m_w, items };
     Menu { y: H as i32 - TASKBAR_H - m.height(), ..m }
 }
 
+/// The simple (text-body) apps. Quantum Lab is separate because it has interactive widgets.
+#[derive(Clone, Copy, PartialEq)]
+enum AppKind {
+    Welcome,
+    About,
+    SysMon,
+    Files,
+}
+
+/// Index i of `Scene::apps` corresponds to `APP_KINDS[i]`.
+const APP_KINDS: [AppKind; 4] = [AppKind::Welcome, AppKind::About, AppKind::SysMon, AppKind::Files];
+const SYSMON_IDX: usize = 2;
+
 struct Scene {
-    welcome: Window,
+    apps: [Window; 4],
     qapp: QuantumApp,
     start_open: bool,
+}
+
+impl Scene {
+    fn open_kind(&mut self, kind: AppKind) {
+        for (i, k) in APP_KINDS.iter().enumerate() {
+            if *k == kind {
+                self.apps[i].open = true;
+                self.apps[i].clamp_onscreen();
+            }
+        }
+    }
+}
+
+/// Draw the text body of a simple app inside its window frame.
+fn draw_app_body(kind: AppKind, win: &Window) {
+    use color::*;
+    let (bx, by) = win.body_origin();
+    let (bx, by) = (bx as usize, by as usize);
+    match kind {
+        AppKind::Welcome => {
+            vga13h::draw_string(bx, by, "Welcome to QOS.", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 12, "Click Start for apps,", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 24, "or Q = Quantum Lab.", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 40, "Drag title; [x] closes.", DKGRAY, LTGRAY);
+        }
+        AppKind::About => {
+            vga13h::draw_string(bx, by, "QOS - Quantum OS", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 14, "Preemptive ring3 kernel", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 26, "W^X + per-proc paging", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 38, "Quantum-ready control", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 54, "Heptapus Group", DKGRAY, LTGRAY);
+        }
+        AppKind::SysMon => {
+            let mut nb = [0u8; 20];
+            let mut tb = [0u8; 20];
+            vga13h::draw_string(bx, by, "Scheduler: preemptive", BLACK, LTGRAY);
+            vga13h::draw_string(bx, by + 14, "Processes:", BLACK, LTGRAY);
+            vga13h::draw_string(bx + 8, by + 26, "- shell    (ring0)", DKGRAY, LTGRAY);
+            vga13h::draw_string(bx + 8, by + 38, "- bg-worker(ring0)", DKGRAY, LTGRAY);
+            vga13h::draw_string(bx, by + 56, "bg ticks:", BLACK, LTGRAY);
+            vga13h::draw_string(bx + 80, by + 56, fmt_u64(crate::kthread::bg_counter(), &mut nb), BLUE, LTGRAY);
+            vga13h::draw_string(bx, by + 68, "uptime:", BLACK, LTGRAY);
+            let t = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+            vga13h::draw_string(bx + 80, by + 68, fmt_u64(t, &mut tb), BLUE, LTGRAY);
+        }
+        AppKind::Files => {
+            vga13h::draw_string(bx, by, "File Manager   /", BLACK, LTGRAY);
+            // Real directory listing from the in-kernel filesystem (Phase 3.4).
+            let entries = crate::fs::get_entries(b"");
+            if entries.is_empty() {
+                vga13h::draw_string(bx + 4, by + 16, "(empty)", DKGRAY, LTGRAY);
+            } else {
+                let mut y = by + 16;
+                for (name, is_dir, _size) in entries.iter().take(6) {
+                    let tag = if *is_dir { "[d]" } else { "[f]" };
+                    let fg = if *is_dir { BLUE } else { DKGRAY };
+                    vga13h::draw_string(bx + 4, y, tag, fg, LTGRAY);
+                    let shown = if name.len() > 16 { &name[..16] } else { name.as_str() };
+                    vga13h::draw_string(bx + 32, y, shown, BLACK, LTGRAY);
+                    y += 12;
+                }
+            }
+        }
+    }
+}
+
+/// Format a u64 into a decimal string in `buf`, returning the slice.
+fn fmt_u64(mut n: u64, buf: &mut [u8; 20]) -> &str {
+    let mut i = buf.len();
+    if n == 0 {
+        i -= 1;
+        buf[i] = b'0';
+    }
+    while n > 0 {
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+    }
+    core::str::from_utf8(&buf[i..]).unwrap_or("?")
+}
+
+/// Draw the live taskbar status (right side): a background-task counter (proof that a
+/// preemptive kernel thread runs *behind* the GUI) and an HH:MM:SS clock. Cheap enough to
+/// repaint a few times a second.
+fn draw_status() {
+    use color::*;
+    let ty = H - TASKBAR_H as usize;
+    let x0 = 116usize;
+    vga13h::fill_rect(x0, ty + 1, W - x0, TASKBAR_H as usize - 2, LTGRAY);
+
+    // Background-task counter — advances while you use the desktop (Phase 2 preemption, live).
+    let mut nbuf = [0u8; 20];
+    vga13h::draw_string(x0, ty + 3, "bg:", BLACK, LTGRAY);
+    vga13h::draw_string(x0 + 24, ty + 3, fmt_u64(crate::kthread::bg_counter(), &mut nbuf), BLUE, LTGRAY);
+
+    // Clock HH:MM:SS from the RTC.
+    let dt = crate::rtc::read_datetime();
+    let (h, m, s) = (dt.hour as u32, dt.minute as u32, dt.second as u32);
+    let clk = [
+        b'0' + (h / 10 % 10) as u8, b'0' + (h % 10) as u8, b':',
+        b'0' + (m / 10 % 10) as u8, b'0' + (m % 10) as u8, b':',
+        b'0' + (s / 10 % 10) as u8, b'0' + (s % 10) as u8,
+    ];
+    let clk = core::str::from_utf8(&clk).unwrap_or("--:--:--");
+    vga13h::draw_string(W - 8 * 8 - 2, ty + 3, clk, BLACK, LTGRAY);
 }
 
 fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pressed: bool) {
@@ -391,8 +493,13 @@ fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pres
     vga13h::draw_string(2, 2, "QOS Desktop", WHITE, BLUE);
     vga13h::draw_string(W - 17 * 8, 2, "ESC: exit to shell", WHITE, BLUE);
 
-    // Windows (welcome below, quantum app on top).
-    draw_welcome(&scene.welcome);
+    // Simple app windows (z-order = array order), then the Quantum Lab on top.
+    for (i, win) in scene.apps.iter().enumerate() {
+        if win.open {
+            win.draw_frame();
+            draw_app_body(APP_KINDS[i], win);
+        }
+    }
     scene.qapp.draw(run_pressed);
 
     // Taskbar.
@@ -401,8 +508,9 @@ fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pres
     vga13h::fill_rect(0, ty, W, 1, WHITE);
     START_BTN.draw(start_pressed || scene.start_open);
     if scene.qapp.win.open {
-        vga13h::draw_string(58, ty + 3, "Quantum Lab", BLACK, LTGRAY);
+        vga13h::draw_string(58, ty + 3, "QLab", BLACK, LTGRAY);
     }
+    draw_status();
 
     // Start menu popup (drawn last so it's on top of everything).
     if scene.start_open {
@@ -415,8 +523,17 @@ pub fn run() {
     crate::serial_println!("[GFXUI] entering interactive desktop");
     vga13h::enter();
 
+    // Phase 3.1: a real preemptive background task runs behind the GUI (its counter ticks up
+    // live in the taskbar) — Phase-2 multitasking made visible. Stopped on every exit path.
+    crate::kthread::start_background_worker();
+
     let mut scene = Scene {
-        welcome: Window { x: 30, y: 90, w: 168, h: 82, title: "Welcome", open: true },
+        apps: [
+            Window { x: 16, y: 84, w: 184, h: 76, title: "Welcome", open: true },
+            Window { x: 76, y: 40, w: 176, h: 82, title: "About", open: false },
+            Window { x: 40, y: 28, w: 184, h: 104, title: "Task Monitor", open: false },
+            Window { x: 52, y: 52, w: 176, h: 104, title: "Files", open: false },
+        ],
         qapp: QuantumApp::new(),
         start_open: false,
     };
@@ -430,8 +547,8 @@ pub fn run() {
     #[derive(PartialEq)]
     enum Drag {
         None,
-        Welcome,
         Quantum,
+        App(usize),
     }
     let mut drag = Drag::None;
     let mut drag_dx = 0i32;
@@ -441,6 +558,8 @@ pub fn run() {
     cur.save_bg();
     cur.draw();
 
+    let mut last_status = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+
     loop {
         if input::has_events() {
             cur.restore_bg();
@@ -449,12 +568,13 @@ pub fn run() {
             while let Some(ev) = input::poll() {
                 match ev {
                     InputEvent::Key { scancode: 0x01, pressed: true } => {
+                        crate::kthread::stop_background_worker();
                         vga13h::leave();
                         crate::serial_println!("[GFXUI] exited to text mode");
                         return;
                     }
                     // Keyboard shortcuts (also makes the desktop usable without a mouse):
-                    // Q = open Quantum Lab, R = run it, W = open Welcome.
+                    // Q=Quantum Lab, R=run it, W=Welcome, A=About, M=Monitor, F=Files.
                     InputEvent::Key { scancode: 0x10, pressed: true } => {
                         scene.qapp.win.open = true;
                         scene.qapp.win.clamp_onscreen();
@@ -468,7 +588,22 @@ pub fn run() {
                         }
                     }
                     InputEvent::Key { scancode: 0x11, pressed: true } => {
-                        scene.welcome.open = true;
+                        scene.open_kind(AppKind::Welcome);
+                        scene.start_open = false;
+                        dirty = true;
+                    }
+                    InputEvent::Key { scancode: 0x1E, pressed: true } => {
+                        scene.open_kind(AppKind::About);
+                        scene.start_open = false;
+                        dirty = true;
+                    }
+                    InputEvent::Key { scancode: 0x32, pressed: true } => {
+                        scene.open_kind(AppKind::SysMon);
+                        scene.start_open = false;
+                        dirty = true;
+                    }
+                    InputEvent::Key { scancode: 0x21, pressed: true } => {
+                        scene.open_kind(AppKind::Files);
                         scene.start_open = false;
                         dirty = true;
                     }
@@ -477,16 +612,16 @@ pub fn run() {
                         cur.y = (cur.y - dy as i32).clamp(0, H as i32 - 1); // PS/2 +dy = up
                         let (hx, hy) = cur.hotspot();
                         match drag {
-                            Drag::Welcome => {
-                                scene.welcome.x = hx - drag_dx;
-                                scene.welcome.y = hy - drag_dy;
-                                scene.welcome.clamp_onscreen();
-                                dirty = true;
-                            }
                             Drag::Quantum => {
                                 scene.qapp.win.x = hx - drag_dx;
                                 scene.qapp.win.y = hy - drag_dy;
                                 scene.qapp.win.clamp_onscreen();
+                                dirty = true;
+                            }
+                            Drag::App(i) => {
+                                scene.apps[i].x = hx - drag_dx;
+                                scene.apps[i].y = hy - drag_dy;
+                                scene.apps[i].clamp_onscreen();
                                 dirty = true;
                             }
                             Drag::None => {}
@@ -510,8 +645,11 @@ pub fn run() {
                                             scene.qapp.win.open = true;
                                             scene.qapp.win.clamp_onscreen();
                                         }
-                                        "Welcome" => scene.welcome.open = true,
+                                        "Files" => scene.open_kind(AppKind::Files),
+                                        "Task Monitor" => scene.open_kind(AppKind::SysMon),
+                                        "About" => scene.open_kind(AppKind::About),
                                         "Exit" => {
+                                            crate::kthread::stop_background_worker();
                                             vga13h::leave();
                                             crate::serial_println!("[GFXUI] exited via Start>Exit");
                                             return;
@@ -542,14 +680,24 @@ pub fn run() {
                                 drag_dx = hx - scene.qapp.win.x;
                                 drag_dy = hy - scene.qapp.win.y;
                             }
-                            // 4) Welcome window.
-                            else if scene.welcome.in_close(hx, hy) {
-                                scene.welcome.open = false;
-                                dirty = true;
-                            } else if scene.welcome.in_titlebar(hx, hy) {
-                                drag = Drag::Welcome;
-                                drag_dx = hx - scene.welcome.x;
-                                drag_dy = hy - scene.welcome.y;
+                            // 4) Simple app windows, topmost (last drawn) first.
+                            else {
+                                for i in (0..scene.apps.len()).rev() {
+                                    if !scene.apps[i].open {
+                                        continue;
+                                    }
+                                    if scene.apps[i].in_close(hx, hy) {
+                                        scene.apps[i].open = false;
+                                        dirty = true;
+                                        break;
+                                    }
+                                    if scene.apps[i].in_titlebar(hx, hy) {
+                                        drag = Drag::App(i);
+                                        drag_dx = hx - scene.apps[i].x;
+                                        drag_dy = hy - scene.apps[i].y;
+                                        break;
+                                    }
+                                }
                             }
                         } else {
                             drag = Drag::None;
@@ -572,6 +720,23 @@ pub fn run() {
             }
             cur.save_bg();
             cur.draw();
+            last_status = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+        } else {
+            // No input: refresh the live taskbar (bg counter + clock) a few times a second
+            // without a full repaint, so the desktop visibly "breathes".
+            let now = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+            if now.wrapping_sub(last_status) >= 20 {
+                last_status = now;
+                cur.restore_bg();
+                // Keep the Task Monitor live (its counters change); otherwise just the taskbar.
+                if scene.apps[SYSMON_IDX].open {
+                    draw_scene(&scene, hover, start_pressed, run_pressed);
+                } else {
+                    draw_status();
+                }
+                cur.save_bg();
+                cur.draw();
+            }
         }
 
         x86_64::instructions::hlt();

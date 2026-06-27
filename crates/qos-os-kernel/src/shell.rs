@@ -88,7 +88,7 @@ pub fn alias_list() -> alloc::vec::Vec<(String, String)> {
 
 /// List of all available shell commands for tab completion
 static COMMANDS: &[&[u8]] = &[
-    b"help", b"kbd", b"clear", b"gfx", b"gdesk", b"evtest", b"threadtest", b"proctest", b"faulttest", b"exittest", b"crash", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
+    b"help", b"kbd", b"clear", b"gfx", b"gdesk", b"evtest", b"threadtest", b"proctest", b"faulttest", b"exittest", b"regabitest", b"wxtest", b"ipctest", b"crash", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
     b"mkdir", b"mkbell", b"edit", b"touch", b"submit", b"write",
     b"disk-id", b"disk-read", b"mkfs", b"dls", b"dcat", b"drm", b"dput", b"dget", b"dsubmit",
     b"vls", b"vcat", b"vrm", b"vcp", b"vsubmit",
@@ -1852,6 +1852,35 @@ impl ShellTask {
             crate::user::clear_ring3_test_stacks();
             crate::println!("regabitest: done (see serial for the ring3 message + exit)");
             crate::serial_println!("[REGABI] done");
+        } else if Self::eq(cmd, b"wxtest") {
+            // Phase 2.3: prove W^X. A process tries to write to its own (read-execute) code
+            // page; the write must fault and the kernel must kill only that process.
+            use core::sync::atomic::Ordering;
+            crate::kthread::reset();
+            crate::user::clear_ring3_test_stacks();
+            let h = crate::user::spawn_ring3_wxviolator();
+            crate::kthread::adopt_user(h.saved_rsp, h.cr3, h.rsp0_top);
+            crate::serial_println!("[WXTEST] W^X violator adopted; arming");
+            crate::println!("wxtest: ring3 process tries to write its own code page; watch serial...");
+            let start = interrupts::TICKS.load(Ordering::Relaxed);
+            crate::kthread::arm();
+            while !crate::kthread::all_finished() {
+                if interrupts::TICKS.load(Ordering::Relaxed).wrapping_sub(start) > 400 {
+                    crate::serial_println!("[WXTEST] timeout");
+                    break;
+                }
+                x86_64::instructions::hlt();
+            }
+            crate::kthread::disarm();
+            crate::kthread::reset();
+            crate::memory::switch_to_kernel_cr3();
+            crate::user::clear_ring3_test_stacks();
+            crate::println!("wxtest: W^X violation was caught; kernel survived");
+            crate::serial_println!("[WXTEST] done");
+        } else if Self::eq(cmd, b"ipctest") {
+            // Phase 2.4: prove IPC. A producer and consumer thread exchange bytes over a
+            // kernel pipe while both are preempted by the timer.
+            crate::ipc::demo();
         } else if Self::eq(cmd, b"evtest") {
             crate::println!("evtest: capturing input events ~3s (press keys / move mouse), see serial");
             let start = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
