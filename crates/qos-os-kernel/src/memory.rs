@@ -1,4 +1,4 @@
-use bootloader::bootinfo::{MemoryMap, MemoryRegionType};
+use bootloader_api::info::{MemoryRegionKind, MemoryRegions};
 use lazy_static::lazy_static;
 use spin::Mutex;
 use alloc::vec::Vec;
@@ -27,13 +27,13 @@ pub unsafe fn init(physical_memory_offset: VirtAddr) -> OffsetPageTable<'static>
     OffsetPageTable::new(level_4_table, physical_memory_offset)
 }
 
-pub unsafe fn init_global(physical_memory_offset: VirtAddr, memory_map: &'static MemoryMap) {
+pub unsafe fn init_global(physical_memory_offset: VirtAddr, memory_regions: &'static MemoryRegions) {
     *PHYS_OFFSET.lock() = Some(physical_memory_offset);
     let (kcr3, _) = Cr3::read();
     *KERNEL_CR3.lock() = Some(kcr3);
 
     let mapper = init(physical_memory_offset);
-    let frame_allocator = BootInfoFrameAllocator::init(memory_map);
+    let frame_allocator = BootInfoFrameAllocator::init(memory_regions);
     *MEMORY_CTX.lock() = Some(MemoryContext {
         mapper,
         frame_allocator,
@@ -114,15 +114,15 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
 }
 
 pub struct BootInfoFrameAllocator {
-    memory_map: &'static MemoryMap,
+    memory_regions: &'static MemoryRegions,
     next: usize,
     recycled: Vec<PhysFrame<Size4KiB>>,
 }
 
 impl BootInfoFrameAllocator {
-    pub unsafe fn init(memory_map: &'static MemoryMap) -> Self {
+    pub unsafe fn init(memory_regions: &'static MemoryRegions) -> Self {
         BootInfoFrameAllocator {
-            memory_map,
+            memory_regions,
             next: 0,
             recycled: Vec::new(),
         }
@@ -134,15 +134,12 @@ impl BootInfoFrameAllocator {
     }
 
     fn usable_frames(&self) -> impl Iterator<Item = PhysFrame<Size4KiB>> {
-        let regions = self.memory_map.iter();
-        let usable = regions.filter(|r| r.region_type == MemoryRegionType::Usable);
-
-        let frame_numbers = usable.flat_map(|r| r.range.start_frame_number..r.range.end_frame_number);
-
-        frame_numbers.map(|frame_number| {
-            let addr = PhysAddr::new(frame_number * 4096);
-            PhysFrame::containing_address(addr)
-        })
+        // bootloader 0.11: iterate usable MemoryRegions and step through them in 4 KiB frames.
+        let regions = self.memory_regions.iter();
+        let usable = regions.filter(|r| r.kind == MemoryRegionKind::Usable);
+        let addr_ranges = usable.map(|r| r.start..r.end);
+        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
+        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
     }
 }
 

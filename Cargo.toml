@@ -5,6 +5,7 @@ members = [
   # "crates/qosd",           # Disabled: daemon for host, uses std (re-enable with ADR-0011)
   # "crates/qos-pybridge",   # Disabled: Python bridge, uses std
   "crates/qos-os-kernel",    # Main kernel (no_std)
+  "crates/qos-image",        # Bootable BIOS+UEFI image builder (bootloader 0.11). See ADR-0014.
   # "crates/qos-os-xtask",   # Disabled: uses std, we'll use bootimage directly
   # "crates/qos-userdemo",   # Disabled: linker error with _start symbol
 ]

@@ -1,5 +1,12 @@
+[unstable]
+# Artifact dependencies: lets the image builder (qos-image) depend on the kernel binary.
+bindeps = true
+
 [alias]
 xtask = "run -p qos-os-xtask --"
+
+# Build bootable BIOS + UEFI images (bootloader 0.11) and copy them to dist/.
+image = "run -p qos-image --release"
 
 # Convenience aliases for the bare-metal kernel package (`os`).
 os-build = "build -p os --target x86_64-unknown-none -Zbuild-std=core,alloc"

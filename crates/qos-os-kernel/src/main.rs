@@ -59,11 +59,21 @@ mod explorer;   // File explorer
 mod desktop;    // Windows-style desktop environment
 mod desktop_apps; // Desktop applications
 
-use bootloader::{entry_point, BootInfo};
+use bootloader_api::{entry_point, BootInfo, BootloaderConfig};
+use bootloader_api::config::Mapping;
 
-entry_point!(kernel_main);
+// Bootloader config (bootloader 0.11): request a dynamic physical-memory mapping so the kernel
+// gets `physical_memory_offset`, and give the kernel a generous stack.
+pub static BOOTLOADER_CONFIG: BootloaderConfig = {
+    let mut config = BootloaderConfig::new_default();
+    config.mappings.physical_memory = Some(Mapping::Dynamic);
+    config.kernel_stack_size = 256 * 1024; // 256 KiB
+    config
+};
 
-fn kernel_main(boot_info: &'static BootInfo) -> ! {
+entry_point!(kernel_main, config = &BOOTLOADER_CONFIG);
+
+fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     serial::init();
 
     serial::println!("QOS-OS boot OK (serial)");
@@ -75,8 +85,13 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     splash::show_splash();
     splash::show_progress("Initializing memory...");
 
-    let phys_mem_offset = x86_64::VirtAddr::new(boot_info.physical_memory_offset);
-    unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_map) };
+    let phys_mem_offset = x86_64::VirtAddr::new(
+        boot_info
+            .physical_memory_offset
+            .into_option()
+            .expect("bootloader did not provide a physical memory offset"),
+    );
+    unsafe { memory::init_global(phys_mem_offset, &boot_info.memory_regions) };
     memory::with_ctx(|mapper, frame_allocator| {
         allocator::init_heap(mapper, frame_allocator).expect("heap init failed")
     });
