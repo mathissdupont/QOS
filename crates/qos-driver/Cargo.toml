@@ -1,0 +1,10 @@
+[package]
+name = "qos-driver"
+version = "0.1.0"
+edition = "2021"
+description = "Portable device/driver model core for QOS: device ids, resources, the Driver/DeviceIo traits, and the DeviceManager that matches and binds drivers to enumerated devices. Hardware access is behind DeviceIo so the core is host-testable. See ADR-0016."
+license = "PolyForm-Noncommercial-1.0.0"
+
+[lib]
+# `no_std` when built into the kernel; the default test harness needs std, so
+# `#![cfg_attr(not(test), no_std)]` gives us both. Uses `alloc`.

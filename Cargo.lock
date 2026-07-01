@@ -338,6 +338,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "qos-driver"
+version = "0.1.0"
+
+[[package]]
 name = "qos-gfx"
 version = "0.1.0"
 
