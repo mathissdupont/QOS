@@ -35,6 +35,7 @@ mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 
 mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
 mod device;     // Device/driver model integration (qos-driver) — ADR-0016, epic E-01
 mod apic;       // ACPI/APIC discovery (qos-acpi) — ADR-0015, epic E-10
+mod xhci;       // xHCI USB host-controller driver — ADR-0015, epic E-20 (WP-04)
 
 mod allocator;
 mod ata;

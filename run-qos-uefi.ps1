@@ -83,7 +83,12 @@ $qargs = @(
     '-drive', "if=pflash,unit=0,format=raw,readonly=on,file=$codeCopy",
     '-drive', "if=pflash,unit=1,format=raw,file=$varsCopy",
     '-drive', "format=raw,file=$bootImg",
-    '-m', '512M'
+    '-m', '512M',
+    # A modern USB (xHCI) controller plus a USB keyboard/mouse, so the USB stack (WP-04) has real
+    # hardware to drive. PS/2 kbd/mouse still work too.
+    '-device', 'qemu-xhci',
+    '-device', 'usb-kbd',
+    '-device', 'usb-mouse'
 )
 
 Write-Host ''

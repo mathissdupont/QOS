@@ -54,12 +54,20 @@ fn pci_class(dev: &PciDevice) -> u32 {
 }
 
 /// Derive the resource list for a PCI device from BAR0 and its interrupt line.
+///
+/// BAR0 encoding: bit0 = 0 → memory BAR (bits[2:1] give the type: 00 = 32-bit, 10 = 64-bit, where
+/// the high 32 bits live in BAR1); bit0 = 1 → I/O BAR. Handling the **64-bit** case matters: many
+/// modern controllers (e.g. the xHCI USB host controller) place their MMIO above 4 GiB, so the
+/// real base is `(bar1 << 32) | (bar0 & !0xF)` — using bar0 alone yields base 0.
 fn pci_resources(dev: &PciDevice) -> alloc::vec::Vec<Resource> {
     let mut res = alloc::vec::Vec::new();
     if dev.bar0 != 0 {
         if dev.bar0 & 1 == 0 {
-            // Memory BAR: bit0=0. Mask the low flag bits to get the base.
-            res.push(Resource::Mmio { base: (dev.bar0 & !0xF) as u64, len: 0 });
+            // Memory BAR. bits[2:1] == 0b10 → 64-bit: combine BAR1 as the high dword.
+            let is_64bit = (dev.bar0 >> 1) & 0b11 == 0b10;
+            let low = (dev.bar0 & !0xF) as u64;
+            let base = if is_64bit { ((dev.bar1 as u64) << 32) | low } else { low };
+            res.push(Resource::Mmio { base, len: 0 });
         } else {
             // I/O BAR: bit0=1. Mask the low 2 flag bits.
             res.push(Resource::Port { base: (dev.bar0 & !0x3) as u16, len: 0 });
@@ -101,6 +109,7 @@ impl Driver for E1000Driver {
 pub fn init() {
     let mut mgr = DeviceManager::new();
     mgr.register_driver(Box::new(E1000Driver));
+    mgr.register_driver(Box::new(crate::xhci::XhciDriver));
 
     for pdev in pci::devices() {
         let id = DeviceId::pci(pdev.vendor_id, pdev.device_id, pci_class(&pdev));
