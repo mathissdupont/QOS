@@ -13,6 +13,7 @@ pc-keyboard = "0.8"
 linked_list_allocator = "0.10"
 qos-abi = { path = "../qos-abi", default-features = false }
 qos-gfx = { path = "../qos-gfx" }
+qos-driver = { path = "../qos-driver" }
 libm = "0.2"
 
 [features]

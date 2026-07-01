@@ -94,6 +94,49 @@ impl Topology {
     pub fn is_connected(&self, a: usize, b: usize) -> bool {
         a < self.n_qubits && b < self.n_qubits && self.connections[a].contains(&b)
     }
+
+    /// True if every distinct pair of qubits is directly connected (no routing ever needed).
+    pub fn is_all_to_all(&self) -> bool {
+        (0..self.n_qubits).all(|i| self.connections[i].len() == self.n_qubits.saturating_sub(1))
+    }
+
+    /// Shortest connectivity path from `a` to `b` (inclusive) via breadth-first search, or
+    /// `None` if they are in disconnected components. `[a]` when `a == b`. Used by the router
+    /// (ADR-0008) to decide how many SWAPs bring two logical qubits adjacent.
+    pub fn shortest_path(&self, a: usize, b: usize) -> Option<Vec<usize>> {
+        if a >= self.n_qubits || b >= self.n_qubits {
+            return None;
+        }
+        if a == b {
+            return Some(alloc::vec![a]);
+        }
+        let mut prev: Vec<Option<usize>> = alloc::vec![None; self.n_qubits];
+        let mut visited = alloc::vec![false; self.n_qubits];
+        let mut queue: alloc::collections::VecDeque<usize> = alloc::collections::VecDeque::new();
+        visited[a] = true;
+        queue.push_back(a);
+        while let Some(node) = queue.pop_front() {
+            if node == b {
+                // Reconstruct the path by walking `prev` back to `a`.
+                let mut path = alloc::vec![b];
+                let mut cur = b;
+                while let Some(p) = prev[cur] {
+                    path.push(p);
+                    cur = p;
+                }
+                path.reverse();
+                return Some(path);
+            }
+            for &next in &self.connections[node] {
+                if !visited[next] {
+                    visited[next] = true;
+                    prev[next] = Some(node);
+                    queue.push_back(next);
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Characterization / calibration data for a backend (ADR-0007).

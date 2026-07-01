@@ -283,6 +283,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "qos-abi",
+ "qos-driver",
  "qos-gfx",
  "spin",
  "x86_64",

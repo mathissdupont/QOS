@@ -33,6 +33,7 @@ mod ui;
 mod vga;
 mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
 mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
+mod device;     // Device/driver model integration (qos-driver) — ADR-0016, epic E-01
 
 mod allocator;
 mod ata;
@@ -130,6 +131,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     splash::show_progress("Detecting hardware...");
     rtc::init();          // Real-Time Clock
     pci::init();          // PCI bus enumeration
+    device::init();       // Device/driver model: match PCI devices to drivers (ADR-0016, additive)
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
     // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
     syscall_ext::init();  // Extended syscalls
