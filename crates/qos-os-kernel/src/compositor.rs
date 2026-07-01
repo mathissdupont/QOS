@@ -96,7 +96,13 @@ struct Desktop {
     cursor: (i32, i32),
     drag: Option<(usize, i32, i32)>, // (window index, grab offset x, grab offset y)
     dirty: bool,
+    /// When dirty, `full` = blit the whole screen; otherwise `damage` = the sub-rect to blit.
+    full: bool,
+    damage: Rect,
 }
+
+/// Margin around a window rect that its shadow extends into (for damage rects).
+const SHADOW_MARGIN: i32 = 34;
 
 impl Desktop {
     fn new(w: i32, h: i32) -> Self {
@@ -105,7 +111,30 @@ impl Desktop {
             Win { rect: Rect::new(w / 2 - 430, 96, 520, 360), kind: AppKind::Terminal },
             Win { rect: Rect::new(w / 2 - 20, 250, 500, 320), kind: AppKind::Files },
         ];
-        Desktop { w, h, theme: Theme::dark(), wins, cursor: (w / 2, h / 2), drag: None, dirty: true }
+        Desktop {
+            w,
+            h,
+            theme: Theme::dark(),
+            wins,
+            cursor: (w / 2, h / 2),
+            drag: None,
+            dirty: true,
+            full: true,
+            damage: Rect::new(0, 0, 0, 0),
+        }
+    }
+
+    /// Mark the whole screen for redraw (z-order / theme / open / close changes).
+    fn mark_full(&mut self) {
+        self.dirty = true;
+        self.full = true;
+    }
+    /// Mark just `r` for redraw (accumulated); a full mark wins.
+    fn mark_region(&mut self, r: Rect) {
+        self.dirty = true;
+        if !self.full {
+            self.damage = self.damage.union(&r);
+        }
     }
 
     // ---- geometry / hit-testing ----
@@ -137,7 +166,7 @@ impl Desktop {
             let rect = Rect::new((self.w / 2 - 260 + n * 28).max(20), (110 + n * 28).min(self.h - 360), 500, 320);
             self.wins.push(Win { rect, kind });
         }
-        self.dirty = true;
+        self.mark_full();
     }
 
     // ---- input ----
@@ -149,9 +178,12 @@ impl Desktop {
         // caller, so it must NOT dirty (and thus fully recompose) the whole desktop.
         if let Some((idx, ox, oy)) = self.drag {
             if idx < self.wins.len() {
+                let old = self.wins[idx].rect;
                 self.wins[idx].rect.x = self.cursor.0 - ox;
                 self.wins[idx].rect.y = (self.cursor.1 - oy).max(BAR_H);
-                self.dirty = true;
+                let new = self.wins[idx].rect;
+                // Only the old + new window footprints (plus shadow) changed — blit just that.
+                self.mark_region(old.union(&new).inflate(SHADOW_MARGIN));
             }
         }
     }
@@ -161,7 +193,7 @@ impl Desktop {
         // Top menu bar: theme toggle.
         if self.theme_btn().contains(cx, cy) {
             self.theme = self.theme.toggled();
-            self.dirty = true;
+            self.mark_full();
             return;
         }
         // Windows, top-most first.
@@ -170,7 +202,7 @@ impl Desktop {
             let (dxc, dyc) = self.close_dot(&r);
             if (cx - dxc).abs() <= 9 && (cy - dyc).abs() <= 9 {
                 self.wins.remove(i); // close
-                self.dirty = true;
+                self.mark_full();
                 return;
             }
             if r.contains(cx, cy) {
@@ -182,7 +214,7 @@ impl Desktop {
                 if on_header {
                     self.drag = Some((self.wins.len() - 1, off.0, off.1));
                 }
-                self.dirty = true;
+                self.mark_full();
                 return;
             }
         }
@@ -197,7 +229,7 @@ impl Desktop {
 
     fn on_left_up(&mut self) {
         if self.drag.take().is_some() {
-            self.dirty = true;
+            self.mark_full();
         }
     }
 
@@ -328,61 +360,39 @@ fn draw_cursor_fb(cx: i32, cy: i32) {
     }
 }
 
-/// Render one frame of the boot splash for animation parameter `e` in `0..=DURATION` ticks.
-fn splash_frame(s: &mut Surface, theme: &Theme, e: i32, duration: i32) {
-    let (w, h) = (s.width as i32, s.height as i32);
-    // Phases (in ticks): fade+scale in, hold, fade out.
-    let in_end = duration * 33 / 100;
-    let hold_end = duration * 73 / 100;
-    let alpha: i32 = if e < in_end {
-        e * 255 / in_end
-    } else if e < hold_end {
-        255
-    } else {
-        255 - (e - hold_end) * 255 / (duration - hold_end).max(1)
-    };
-    let alpha = alpha.clamp(0, 255) as u8;
-    // Scale from 82% to 100% during the fade-in (ease toward full), then steady.
-    let scale_pct = if e < in_end { 82 + 18 * e / in_end } else { 100 };
-
-    // Background: the dark theme wallpaper gradient.
-    s.gradient_v(Rect::new(0, 0, w, h), theme.wallpaper_top, theme.wallpaper_bottom);
-
-    // Centered logo, tinted near-white, growing + fading in.
-    let base = (h * 44 / 100).min(w * 44 / 100); // fit comfortably on screen
-    let size = base * scale_pct / 100;
-    let dst = Rect::new((w - size) / 2, (h - size) / 2 - h / 20, size, size);
-    s.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, dst, theme.text, alpha);
-
-    // A slim accent loading bar near the bottom that fills with progress.
-    let bar_w = w * 22 / 100;
-    let bar_h = 6;
-    let bx = (w - bar_w) / 2;
-    let by = h * 82 / 100;
-    s.rounded_rect(Rect::new(bx, by, bar_w, bar_h), 3, theme.surface_alt);
-    let fill = (bar_w * e / duration).clamp(0, bar_w);
-    if fill > 0 {
-        s.rounded_rect(Rect::new(bx, by, fill, bar_h), 3, theme.accent);
-    }
-}
-
 /// Play the branded animated boot splash (WP-05 step 2): the Heptapus logo fades in, grows, holds,
-/// then fades out over ~1.5 s, with a loading bar. Runs after init (heap/timer/framebuffer ready),
-/// before the shell. A keypress skips it. No-op without a linear framebuffer.
+/// then fades out over ~1.5 s, with a loading bar. The gradient background is drawn once; each
+/// frame only the logo box and the bar are recomposed and blitted (region updates, not the whole
+/// 1280×800 screen), so the animation stays smooth. A keypress skips it.
 pub fn run_splash() {
     let info = match crate::framebuffer::info() {
         Some(i) => i,
         None => return,
     };
     let (w, h) = (info.width, info.height);
+    let (wi, hi) = (w as i32, h as i32);
     let theme = Theme::dark();
-    let mut surface = Surface::new(w, h);
     crate::serial_println!("[UI] boot splash: {}x{} Heptapus animation", w, h);
 
+    // Static gradient background: composed once, blitted once, then kept as the source for the
+    // per-frame region patches (so we never re-touch the whole framebuffer).
+    let mut bg = Surface::new(w, h);
+    bg.gradient_v(Rect::new(0, 0, wi, hi), theme.wallpaper_top, theme.wallpaper_bottom);
+    crate::framebuffer::blit_region(&bg.pixels, w, 0, 0, w, h);
+
+    // Fixed logo box (max size, centered) + bar region — the only areas that change per frame.
+    let base = (hi * 44 / 100).min(wi * 44 / 100);
+    let logo_box = Rect::new(wi / 2 - base / 2, hi / 2 - hi / 20 - base / 2, base, base);
+    let bar_w = wi * 22 / 100;
+    let bar_h = 6;
+    let bar_box = Rect::new((wi - bar_w) / 2, hi * 82 / 100, bar_w, bar_h);
+    let mut logo_patch = Surface::new(base as usize, base as usize);
+    let mut bar_patch = Surface::new(bar_w as usize, bar_h as usize);
+
     const DURATION: i32 = 150; // ~1.5 s at the 100 Hz APIC tick
-    // Drain any input queued during boot so a stale event doesn't instantly "skip" the splash;
-    // only a key pressed *during* the splash should skip it.
-    while crate::input::poll().is_some() {}
+    let in_end = DURATION * 33 / 100;
+    let hold_end = DURATION * 73 / 100;
+    while crate::input::poll().is_some() {} // drop stale boot input
     let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
     let mut last_e = -1;
     loop {
@@ -391,13 +401,35 @@ pub fn run_splash() {
         if e >= DURATION {
             break;
         }
-        // Skip on a key pressed during the splash.
         if let Some(crate::input::InputEvent::Key { pressed: true, .. }) = crate::input::poll() {
             break;
         }
         if e != last_e {
-            splash_frame(&mut surface, &theme, e, DURATION);
-            crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            let alpha = if e < in_end {
+                e * 255 / in_end
+            } else if e < hold_end {
+                255
+            } else {
+                255 - (e - hold_end) * 255 / (DURATION - hold_end).max(1)
+            }
+            .clamp(0, 255) as u8;
+            let scale_pct = if e < in_end { 82 + 18 * e / in_end } else { 100 };
+
+            // Logo patch: restore gradient under the box, draw the scaled+faded logo, blit the box.
+            logo_patch.blit(&bg, -logo_box.x, -logo_box.y);
+            let size = base * scale_pct / 100;
+            let off = (base - size) / 2;
+            logo_patch.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, Rect::new(off, off, size, size), theme.text, alpha);
+            crate::framebuffer::blit_at(&logo_patch.pixels, logo_patch.width, logo_patch.height, logo_box.x as usize, logo_box.y as usize);
+
+            // Bar patch: gradient + track + accent fill.
+            bar_patch.blit(&bg, -bar_box.x, -bar_box.y);
+            bar_patch.rounded_rect(Rect::new(0, 0, bar_w, bar_h), 3, theme.surface_alt);
+            let fill = (bar_w * e / DURATION).clamp(0, bar_w);
+            if fill > 0 {
+                bar_patch.rounded_rect(Rect::new(0, 0, fill, bar_h), 3, theme.accent);
+            }
+            crate::framebuffer::blit_at(&bar_patch.pixels, bar_patch.width, bar_patch.height, bar_box.x as usize, bar_box.y as usize);
             last_e = e;
         }
         crate::arch::hlt();
@@ -590,6 +622,8 @@ pub fn run_demo() {
     let mut last_cursor = desk.cursor;
     draw_cursor_fb(last_cursor.0, last_cursor.1);
     desk.dirty = false;
+    desk.full = false;
+    desk.damage = Rect::new(0, 0, 0, 0);
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
@@ -606,7 +640,7 @@ pub fn run_demo() {
                     }
                     0x14 => {
                         desk.theme = desk.theme.toggled();
-                        desk.dirty = true;
+                        desk.mark_full();
                     } // t
                     0x02 => desk.open_app(AppKind::Terminal), // 1
                     0x03 => desk.open_app(AppKind::Files),    // 2
@@ -614,7 +648,7 @@ pub fn run_demo() {
                     0x05 => desk.open_app(AppKind::Settings), // 4
                     0x11 => {
                         if desk.wins.pop().is_some() {
-                            desk.dirty = true;
+                            desk.mark_full();
                         }
                     } // w → close focused
                     _ => {}
@@ -631,13 +665,25 @@ pub fn run_demo() {
             }
         }
         if desk.dirty {
-            // Scene changed (window moved / opened / closed / theme): recompose + full blit, then
-            // redraw the cursor on top.
+            // Scene changed: recompose the surface (RAM), then blit only what changed to the (slow)
+            // framebuffer — the whole screen for z-order/theme/open/close, or just the damage rect
+            // (union of old+new window footprints, plus the cursor's old+new spots) for a drag.
             desk.compose(&mut surface, &mut fr);
-            crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            if desk.full {
+                crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            } else {
+                let cur_old = Rect::new(last_cursor.0, last_cursor.1, CURSOR_W as i32, CURSOR_H as i32);
+                let cur_new = Rect::new(desk.cursor.0, desk.cursor.1, CURSOR_W as i32, CURSOR_H as i32);
+                let region = desk.damage.union(&cur_old).union(&cur_new);
+                if let Some(r) = region.intersect(&Rect::new(0, 0, w as i32, h as i32)) {
+                    crate::framebuffer::blit_region(&surface.pixels, w, r.x as usize, r.y as usize, r.w as usize, r.h as usize);
+                }
+            }
             last_cursor = desk.cursor;
             draw_cursor_fb(last_cursor.0, last_cursor.1);
             desk.dirty = false;
+            desk.full = false;
+            desk.damage = Rect::new(0, 0, 0, 0);
         } else if desk.cursor != last_cursor {
             // Cursor-only move: restore the scene under the old cursor (small blit) and draw the
             // cursor at the new spot. No full recompose — this is what keeps the pointer smooth.

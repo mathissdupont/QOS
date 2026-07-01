@@ -169,6 +169,41 @@ pub fn blit_region(src: &[u32], src_w: usize, x0: usize, y0: usize, w: usize, h:
     }
 }
 
+/// Blit a small true-color source surface (`src_w × src_h`, `0x00RRGGBB`) onto the framebuffer at
+/// `(dst_x, dst_y)`, converting to its byte order. Unlike [`blit_region`] the source has its own
+/// width and is placed at an arbitrary destination — used for region/patch updates (splash,
+/// windows) so only changed pixels hit the (slow) framebuffer MMIO. Clamped to the framebuffer.
+pub fn blit_at(src: &[u32], src_w: usize, src_h: usize, dst_x: usize, dst_y: usize) {
+    let mut g = FRAMEBUFFER.lock();
+    if let Some(ref mut fb) = *g {
+        let bpp = fb.info.bytes_per_pixel;
+        let stride = fb.info.stride;
+        let (fbw, fbh) = (fb.info.width, fb.info.height);
+        let buf_len = fb.buffer.len();
+        for row in 0..src_h {
+            let dy = dst_y + row;
+            if dy >= fbh {
+                break;
+            }
+            let src_row = row * src_w;
+            let dst_row = dy * stride;
+            for col in 0..src_w {
+                let dx = dst_x + col;
+                if dx >= fbw {
+                    break;
+                }
+                let c = src[src_row + col];
+                let off = dst_row + dx * bpp;
+                if off + 2 < buf_len {
+                    fb.buffer[off] = (c & 0xFF) as u8;
+                    fb.buffer[off + 1] = ((c >> 8) & 0xFF) as u8;
+                    fb.buffer[off + 2] = ((c >> 16) & 0xFF) as u8;
+                }
+            }
+        }
+    }
+}
+
 /// Draw a line using Bresenham's algorithm
 pub fn draw_line(x0: usize, y0: usize, x1: usize, y1: usize, color: u32) {
     let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 };
