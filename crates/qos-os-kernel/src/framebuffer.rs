@@ -134,6 +134,41 @@ pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) {
     }
 }
 
+/// Blit a rectangular region of a true-color source buffer (`0x00RRGGBB`, `src_w` pixels wide,
+/// same dimensions as the framebuffer) onto the framebuffer, converting to its byte order. Writes
+/// only the given region under a single lock — this is the compositor's present path (WP-05), so
+/// per-pixel locking would be far too slow. Coordinates are clamped to the framebuffer.
+pub fn blit_region(src: &[u32], src_w: usize, x0: usize, y0: usize, w: usize, h: usize) {
+    let mut g = FRAMEBUFFER.lock();
+    if let Some(ref mut fb) = *g {
+        let bpp = fb.info.bytes_per_pixel;
+        let stride = fb.info.stride;
+        let (fbw, fbh) = (fb.info.width, fb.info.height);
+        let buf_len = fb.buffer.len();
+        for row in 0..h {
+            let sy = y0 + row;
+            if sy >= fbh {
+                break;
+            }
+            let src_row = sy * src_w;
+            let dst_row = sy * stride;
+            for col in 0..w {
+                let sx = x0 + col;
+                if sx >= fbw {
+                    break;
+                }
+                let c = src[src_row + sx];
+                let off = dst_row + sx * bpp;
+                if off + 2 < buf_len {
+                    fb.buffer[off] = (c & 0xFF) as u8; // B
+                    fb.buffer[off + 1] = ((c >> 8) & 0xFF) as u8; // G
+                    fb.buffer[off + 2] = ((c >> 16) & 0xFF) as u8; // R
+                }
+            }
+        }
+    }
+}
+
 /// Draw a line using Bresenham's algorithm
 pub fn draw_line(x0: usize, y0: usize, x1: usize, y1: usize, color: u32) {
     let dx = if x1 > x0 { x1 - x0 } else { x0 - x1 };

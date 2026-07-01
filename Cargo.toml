@@ -2,6 +2,7 @@
 members = [
   "crates/qos-abi",
   "crates/qos-gfx",          # Portable, resolution-agnostic drawing math (palette + scale). See ADR-0014.
+  "crates/qos-ui",           # Portable modern-UI compositor core (surface, primitives, themes). See ADR-0017.
   "crates/qos-driver",       # Portable device/driver model core (host-tested). See ADR-0016.
   "crates/qos-acpi",         # Portable ACPI/MADT table parsing (host-tested). See ADR-0015 (E-10).
   "crates/qos-core",         # Portable control-plane core (no_std + alloc; std feature). See ADR-0003.
