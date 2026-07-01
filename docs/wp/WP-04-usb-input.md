@@ -82,12 +82,13 @@ enable the xHCI interrupter (IMAN.IE + USBCMD.INTE), and either (a) route the co
 PCIe MSI (epic E-12) and use that. On the interrupt, drain the event ring and re-queue the report
 TRB. Keep `poll()` as a fallback.
 
-**Gap — multi-device / mouse.** Enumeration currently addresses only the **first** enabled port
-(the keyboard, port 5), so the mouse (port 6) isn't brought up yet. `process_mouse_report` exists
-and is exercised for whichever single device is a mouse, but to get *both* keyboard and mouse we
-need per-slot device state: loop over all enabled ports, Enable Slot + Address Device + configure
-each, and store a small array of HID devices that `poll_hid` iterates. Do this alongside or before
-Step 5.
+**Multi-device — done.** Enumeration now loops over **every** enabled port (`enumerate_port`),
+giving each device its own slot + interrupt endpoint, stored in `hid_devices: Vec<HidEndpoint>`.
+`poll_hid` drains the shared event ring and routes each Transfer Event to its device by
+`(slot, endpoint id)`. Verified in QEMU: `2 HID device(s) ready` (slot 1 keyboard on port 5, slot 2
+mouse on port 6); `sendkey` produces keystrokes and `mouse_move 15 8` produces
+`MouseMove{dx:15,dy:8}` events. 0 faults. Port/device count is discovered from the hardware, never
+assumed.
 
 ## Notes & gaps
 

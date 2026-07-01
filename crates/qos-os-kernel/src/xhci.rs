@@ -70,31 +70,38 @@ pub struct Xhci {
     pub cmd_cycle: u32,
     pub event_dequeue: usize,
     pub event_cycle: u32,
-    // First addressed device's default-control-endpoint (EP0) transfer ring + slot (single device
-    // for now; a per-slot table comes with multi-device support).
+    // EP0 (default control endpoint) transfer ring of the device currently being enumerated. Each
+    // device is enumerated sequentially, so a single scratch EP0 ring is reused; it is not needed
+    // after a device's interrupt endpoint is configured.
     pub ep0_ring_phys: u64,
     pub ep0_ring_virt: u64,
     pub ep0_enqueue: usize,
     pub ep0_cycle: u32,
     pub dev_slot: u32,
-    // Root-hub port + PORTSC speed of the addressed device (needed to rebuild the slot context for
-    // Configure Endpoint).
+    // Root-hub port + PORTSC speed of the device being enumerated (needed to build the slot context
+    // for Address Device / Configure Endpoint).
     pub dev_port: u32,
     pub dev_speed: u32,
-    // Configured HID interrupt-IN endpoint (WP-04 step 4b). `hid_kind` 0 = none, 1 = keyboard,
-    // 2 = mouse. The endpoint has its own transfer ring; `hid_pending` tracks the single
-    // outstanding Normal TRB we keep queued for the boot report.
-    pub hid_kind: u8,
-    pub hid_ep_dci: u32,
-    pub hid_ep_ring_phys: u64,
-    pub hid_ep_ring_virt: u64,
-    pub hid_ep_enqueue: usize,
-    pub hid_ep_cycle: u32,
-    pub hid_buf_phys: u64,
-    pub hid_buf_virt: u64,
-    pub hid_max_packet: u16,
-    pub hid_pending: bool,
-    pub hid_prev_report: [u8; 8],
+    // All configured HID interrupt-IN endpoints (keyboard, mouse, …), polled from the main loop.
+    pub hid_devices: alloc::vec::Vec<HidEndpoint>,
+}
+
+/// A configured HID interrupt-IN endpoint on some device slot, with its own transfer ring and a
+/// single outstanding Normal TRB (`pending`) carrying the next boot report. `kind`: 1 = keyboard,
+/// 2 = mouse.
+pub struct HidEndpoint {
+    pub slot: u32,
+    pub dci: u32,
+    pub kind: u8,
+    pub ring_phys: u64,
+    pub ring_virt: u64,
+    pub enqueue: usize,
+    pub cycle: u32,
+    pub buf_phys: u64,
+    pub buf_virt: u64,
+    pub max_packet: u16,
+    pub pending: bool,
+    pub prev_report: [u8; 8],
 }
 
 /// TRB types we use.
@@ -286,6 +293,54 @@ impl Xhci {
         None
     }
 
+    /// Enumerate one enabled root-hub port fully (WP-04 steps 3b-2 → 4b): Enable Slot, Address
+    /// Device, read the device descriptor, and — if it exposes a HID boot interrupt-IN endpoint —
+    /// SET_CONFIGURATION, SET_PROTOCOL(boot), and Configure Endpoint (appended to `hid_devices`).
+    /// A failure at any stage is logged and skips just this port, so one bad device can't wedge the
+    /// rest.
+    fn enumerate_port(&mut self, port: u32, speed: u32, io: &mut dyn DeviceIo) {
+        let slot = match self.enable_slot(io) {
+            Some(s) => s,
+            None => return,
+        };
+        crate::serial_println!("[XHCI] Enable Slot -> slot id {} (port {})", slot, port);
+        if !self.address_device(slot, port, speed, io) {
+            return;
+        }
+        crate::serial_println!("[XHCI] Address Device OK: slot {} on port {} is addressed", slot, port);
+
+        if let Some(d) = self.get_device_descriptor(io) {
+            crate::serial_println!(
+                "[XHCI] device descriptor: vendor={:#06x} product={:#06x} class={:#04x} bMaxPacketSize0={}",
+                d.vendor, d.product, d.usb_class, d.max_packet0
+            );
+        }
+
+        let hid = match self.get_hid_interface(io) {
+            Some(h) => h,
+            None => {
+                crate::serial_println!("[XHCI] slot {}: no HID interrupt-IN endpoint", slot);
+                return;
+            }
+        };
+        let kind = match hid.protocol {
+            1 => "keyboard",
+            2 => "mouse",
+            _ => "other",
+        };
+        crate::serial_println!(
+            "[XHCI] HID {}: iface={} ep={:#04x} maxpkt={} interval={} config={}",
+            kind, hid.interface, hid.ep_address, hid.ep_max_packet, hid.ep_interval, hid.config_value
+        );
+        let cfg_ok = self.set_configuration(io, hid.config_value);
+        let proto_ok = self.set_boot_protocol(io, hid.interface as u16);
+        if cfg_ok && proto_ok && self.configure_endpoint(io, &hid) {
+            crate::serial_println!("[XHCI] HID {} ready on slot {} (DCI {})", kind, slot, (hid.ep_address as u32 & 0x0F) * 2 + 1);
+        } else {
+            crate::serial_println!("[XHCI] slot {}: HID setup failed (cfg={} proto={})", slot, cfg_ok, proto_ok);
+        }
+    }
+
     /// Perform a USB control transfer on EP0: a Setup stage, an optional Data stage (`length` > 0,
     /// direction from `dir_in`), and a Status stage in the opposite direction (with IOC so a
     /// Transfer Event is raised). `data_phys` is the physical address of the data buffer (ignored
@@ -446,17 +501,20 @@ impl Xhci {
         self.submit_command(ic_phys as u32, (ic_phys >> 32) as u32, 0, self.dev_slot << 24, TRB_CONFIGURE_ENDPOINT, io);
         match self.wait_command_completion(io) {
             Some((1, _)) => {
-                self.hid_kind = hid.protocol;
-                self.hid_ep_dci = dci;
-                self.hid_ep_ring_phys = ep_ring_phys;
-                self.hid_ep_ring_virt = ep_ring_virt;
-                self.hid_ep_enqueue = 0;
-                self.hid_ep_cycle = 1;
-                self.hid_buf_phys = buf_phys;
-                self.hid_buf_virt = buf_virt;
-                self.hid_max_packet = hid.ep_max_packet;
-                self.hid_pending = false;
-                self.hid_prev_report = [0; 8];
+                self.hid_devices.push(HidEndpoint {
+                    slot: self.dev_slot,
+                    dci,
+                    kind: hid.protocol,
+                    ring_phys: ep_ring_phys,
+                    ring_virt: ep_ring_virt,
+                    enqueue: 0,
+                    cycle: 1,
+                    buf_phys,
+                    buf_virt,
+                    max_packet: hid.ep_max_packet,
+                    pending: false,
+                    prev_report: [0; 8],
+                });
                 true
             }
             Some((cc, _)) => {
@@ -470,34 +528,10 @@ impl Xhci {
         }
     }
 
-    /// Queue one Normal TRB (pointing at the report buffer) on the HID endpoint ring and ring its
-    /// doorbell. Handles wrapping via the trailing Link TRB. One TRB is kept outstanding at a time.
-    fn hid_queue_report(&mut self, io: &mut dyn DeviceIo) {
-        let trb = self.hid_ep_ring_virt + (self.hid_ep_enqueue as u64 * 16);
-        unsafe {
-            core::ptr::write_volatile(trb as *mut u32, self.hid_buf_phys as u32);
-            core::ptr::write_volatile((trb + 4) as *mut u32, (self.hid_buf_phys >> 32) as u32);
-            core::ptr::write_volatile((trb + 8) as *mut u32, self.hid_max_packet as u32);
-            // Normal TRB: IOC (bit 5) + ISP (Interrupt on Short Packet, bit 2) + cycle.
-            core::ptr::write_volatile((trb + 12) as *mut u32, (TRB_NORMAL << 10) | (1 << 5) | (1 << 2) | self.hid_ep_cycle);
-        }
-        self.hid_ep_enqueue += 1;
-        // If the next slot is the Link TRB, refresh its cycle bit and wrap.
-        if self.hid_ep_enqueue == RING_TRBS as usize - 1 {
-            let link = self.hid_ep_ring_virt + ((RING_TRBS as u64 - 1) * 16);
-            unsafe {
-                core::ptr::write_volatile((link + 12) as *mut u32, (TRB_LINK << 10) | (1 << 1) | self.hid_ep_cycle);
-            }
-            self.hid_ep_enqueue = 0;
-            self.hid_ep_cycle ^= 1;
-        }
-        // Ring the device doorbell with DB target = the endpoint's DCI.
-        io.mmio_write32(self.doorbell_base + self.dev_slot as u64 * 4, self.hid_ep_dci);
-    }
-
     /// Non-blocking check of the event ring: return the next event if its cycle bit is current, else
-    /// `None`. Advances the dequeue pointer + ERDP like [`poll_event`] but without spinning.
-    fn try_event(&mut self, io: &mut dyn DeviceIo) -> Option<(u32, u32, u32)> {
+    /// `None`. Returns `(trb_type, completion_code, slot_id, endpoint_id)`. Advances the dequeue
+    /// pointer + ERDP like [`poll_event`] but without spinning.
+    fn try_event(&mut self, io: &mut dyn DeviceIo) -> Option<(u32, u32, u32, u32)> {
         let evt = self.event_ring_virt + (self.event_dequeue as u64 * 16);
         let d3 = unsafe { core::ptr::read_volatile((evt + 12) as *const u32) };
         if (d3 & 1) != self.event_cycle {
@@ -507,6 +541,7 @@ impl Xhci {
         let trb_type = (d3 >> 10) & 0x3F;
         let completion = (d2 >> 24) & 0xFF;
         let slot = (d3 >> 24) & 0xFF;
+        let endpoint = (d3 >> 16) & 0x1F; // Endpoint ID (= DCI) on a Transfer Event
         self.event_dequeue += 1;
         if self.event_dequeue >= RING_TRBS as usize {
             self.event_dequeue = 0;
@@ -514,42 +549,74 @@ impl Xhci {
         }
         let erdp = self.event_ring_phys + (self.event_dequeue as u64 * 16);
         read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp);
-        Some((trb_type, completion, slot))
+        Some((trb_type, completion, slot, endpoint))
     }
 
-    /// Poll the configured HID endpoint (WP-04 step 4b), called from the kernel main loop. Drains
-    /// any completed transfer events (translating boot reports into input), then keeps exactly one
-    /// Normal TRB outstanding for the next report.
+    /// Poll every configured HID endpoint (WP-04 step 4b), called from the kernel main loop. Drains
+    /// completed transfer events (routing each to its device by slot+endpoint and translating the
+    /// boot report into input), then keeps exactly one Normal TRB outstanding per endpoint.
     fn poll_hid(&mut self, io: &mut dyn DeviceIo) {
-        if self.hid_kind == 0 {
+        if self.hid_devices.is_empty() {
             return;
         }
-        while let Some((trb_type, cc, _)) = self.try_event(io) {
+        let doorbell_base = self.doorbell_base;
+        while let Some((trb_type, cc, slot, epid)) = self.try_event(io) {
             // cc 1 = Success, 13 = Short Packet (a full boot report is fine either way).
             if trb_type == TRB_TRANSFER_EVENT && (cc == 1 || cc == 13) {
-                self.process_report();
-                self.hid_pending = false;
+                if let Some(dev) = self.hid_devices.iter_mut().find(|d| d.slot == slot && d.dci == epid) {
+                    dev.process_report();
+                    dev.pending = false;
+                }
             }
         }
-        if !self.hid_pending {
-            self.hid_queue_report(io);
-            self.hid_pending = true;
+        for dev in self.hid_devices.iter_mut() {
+            if !dev.pending {
+                dev.queue_report(doorbell_base, io);
+                dev.pending = true;
+            }
         }
     }
+}
 
-    /// Translate the current boot report in the endpoint buffer into input events and remember it
+impl HidEndpoint {
+    /// Queue one Normal TRB (pointing at the report buffer) on this endpoint's ring and ring its
+    /// doorbell. Handles wrapping via the trailing Link TRB. One TRB is kept outstanding at a time.
+    fn queue_report(&mut self, doorbell_base: u64, io: &mut dyn DeviceIo) {
+        let trb = self.ring_virt + (self.enqueue as u64 * 16);
+        unsafe {
+            core::ptr::write_volatile(trb as *mut u32, self.buf_phys as u32);
+            core::ptr::write_volatile((trb + 4) as *mut u32, (self.buf_phys >> 32) as u32);
+            core::ptr::write_volatile((trb + 8) as *mut u32, self.max_packet as u32);
+            // Normal TRB: IOC (bit 5) + ISP (Interrupt on Short Packet, bit 2) + cycle.
+            core::ptr::write_volatile((trb + 12) as *mut u32, (TRB_NORMAL << 10) | (1 << 5) | (1 << 2) | self.cycle);
+        }
+        self.enqueue += 1;
+        // If the next slot is the Link TRB, refresh its cycle bit and wrap.
+        if self.enqueue == RING_TRBS as usize - 1 {
+            let link = self.ring_virt + ((RING_TRBS as u64 - 1) * 16);
+            unsafe {
+                core::ptr::write_volatile((link + 12) as *mut u32, (TRB_LINK << 10) | (1 << 1) | self.cycle);
+            }
+            self.enqueue = 0;
+            self.cycle ^= 1;
+        }
+        // Ring the device doorbell with DB target = this endpoint's DCI.
+        io.mmio_write32(doorbell_base + self.slot as u64 * 4, self.dci);
+    }
+
+    /// Translate the current boot report in this endpoint's buffer into input events and remember it
     /// for the next diff.
     fn process_report(&mut self) {
         let mut report = [0u8; 8];
         for (i, b) in report.iter_mut().enumerate() {
-            *b = unsafe { core::ptr::read_volatile((self.hid_buf_virt + i as u64) as *const u8) };
+            *b = unsafe { core::ptr::read_volatile((self.buf_virt + i as u64) as *const u8) };
         }
-        match self.hid_kind {
+        match self.kind {
             1 => self.process_keyboard_report(&report),
             2 => process_mouse_report(&report),
             _ => {}
         }
-        self.hid_prev_report = report;
+        self.prev_report = report;
     }
 
     /// Boot keyboard report: byte 0 = modifier bitmap, bytes 2..8 = currently-pressed HID usage IDs.
@@ -557,7 +624,7 @@ impl Xhci {
     /// them through the existing keyboard path (so both the legacy buffer and the unified queue see
     /// them, unchanged for consumers).
     fn process_keyboard_report(&mut self, report: &[u8; 8]) {
-        let prev = self.hid_prev_report;
+        let prev = self.prev_report;
         // Modifier bits → Set-1 make codes: LCtrl, LShift, LAlt, RShift (RCtrl/RAlt/GUI folded onto
         // the left equivalents for the boot shell).
         const MODS: [(u8, u8); 5] = [(0, 0x1D), (1, 0x2A), (2, 0x38), (4, 0x1D), (5, 0x36)];
@@ -872,17 +939,7 @@ fn bring_up(cap_base: u64, io: &mut dyn DeviceIo) -> Result<Xhci, &'static str> 
         dev_slot: 0,
         dev_port: 0,
         dev_speed: 0,
-        hid_kind: 0,
-        hid_ep_dci: 0,
-        hid_ep_ring_phys: 0,
-        hid_ep_ring_virt: 0,
-        hid_ep_enqueue: 0,
-        hid_ep_cycle: 1,
-        hid_buf_phys: 0,
-        hid_buf_virt: 0,
-        hid_max_packet: 0,
-        hid_pending: false,
-        hid_prev_report: [0; 8],
+        hid_devices: alloc::vec::Vec::new(),
     })
 }
 
@@ -926,34 +983,31 @@ fn reset_port(op_base: u64, port: u32, io: &mut dyn DeviceIo) -> bool {
 }
 
 /// Scan + reset the root-hub ports (WP-04 step 3): detect connected ports (3a) and reset each so
-/// it becomes enabled (3b-1). Logs the result; returns the first enabled `(port, speed)`.
-fn scan_ports(op_base: u64, max_ports: u32, io: &mut dyn DeviceIo) -> Option<(u32, u32)> {
+/// it becomes enabled (3b-1). Logs the result; returns every enabled `(port, speed)` so all
+/// attached devices (keyboard, mouse, …) can be enumerated — the count is discovered, not assumed.
+fn scan_ports(op_base: u64, max_ports: u32, io: &mut dyn DeviceIo) -> alloc::vec::Vec<(u32, u32)> {
     let mut connected = 0;
-    let mut enabled_count = 0;
-    let mut first_enabled = None;
+    let mut enabled = alloc::vec::Vec::new();
     for port in 1..=max_ports {
         let portsc = io.mmio_read32(portsc_addr(op_base, port));
         if portsc & PORTSC_CCS != 0 {
             connected += 1;
             let speed = (portsc >> 10) & 0xF;
-            let enabled = reset_port(op_base, port, io);
-            if enabled {
-                enabled_count += 1;
-                if first_enabled.is_none() {
-                    first_enabled = Some((port, speed));
-                }
+            let is_enabled = reset_port(op_base, port, io);
+            if is_enabled {
+                enabled.push((port, speed));
             }
             crate::serial_println!(
                 "[XHCI] port {}: device connected (speed {} {}), after reset enabled={}",
-                port, speed, speed_name(speed), enabled
+                port, speed, speed_name(speed), is_enabled
             );
         }
     }
     crate::serial_println!(
         "[XHCI] ports: {} connected, {} enabled (of {})",
-        connected, enabled_count, max_ports
+        connected, enabled.len(), max_ports
     );
-    first_enabled
+    enabled
 }
 
 pub struct XhciDriver;
@@ -990,54 +1044,12 @@ impl Driver for XhciDriver {
                     "[XHCI] running: op={:#x} runtime={:#x} doorbell={:#x} slots_enabled={}",
                     ctrl.op_base, ctrl.runtime_base, ctrl.doorbell_base, ctrl.max_slots
                 );
-                // Step 3a/3b-1: reset connected ports so they enable; take the first enabled one.
-                if let Some((port, speed)) = scan_ports(ctrl.op_base, max_ports, io) {
-                    // Step 3b-2: get a device slot. Step 3c-1: address the device on that port.
-                    if let Some(slot) = ctrl.enable_slot(io) {
-                        crate::serial_println!("[XHCI] Enable Slot -> slot id {}", slot);
-                        if ctrl.address_device(slot, port, speed, io) {
-                            crate::serial_println!(
-                                "[XHCI] Address Device OK: slot {} on port {} is addressed",
-                                slot, port
-                            );
-                            // Step 3c-2: read the device descriptor over EP0.
-                            if let Some(d) = ctrl.get_device_descriptor(io) {
-                                crate::serial_println!(
-                                    "[XHCI] device descriptor: vendor={:#06x} product={:#06x} class={:#04x} bMaxPacketSize0={}",
-                                    d.vendor, d.product, d.usb_class, d.max_packet0
-                                );
-                            }
-                            // Step 4a: parse the config for the HID boot endpoint, select the
-                            // configuration, and switch the interface to the boot protocol.
-                            if let Some(hid) = ctrl.get_hid_interface(io) {
-                                let kind = match hid.protocol {
-                                    1 => "keyboard",
-                                    2 => "mouse",
-                                    _ => "other",
-                                };
-                                crate::serial_println!(
-                                    "[XHCI] HID {}: iface={} ep={:#04x} maxpkt={} interval={} config={}",
-                                    kind, hid.interface, hid.ep_address, hid.ep_max_packet,
-                                    hid.ep_interval, hid.config_value
-                                );
-                                let cfg_ok = ctrl.set_configuration(io, hid.config_value);
-                                let proto_ok = ctrl.set_boot_protocol(io, hid.interface as u16);
-                                crate::serial_println!(
-                                    "[XHCI] set-config={} set-boot-protocol={}", cfg_ok, proto_ok
-                                );
-                                // Step 4b: configure the interrupt-IN endpoint so it can be polled.
-                                if cfg_ok && proto_ok && ctrl.configure_endpoint(io, &hid) {
-                                    crate::serial_println!(
-                                        "[XHCI] HID {} ready: endpoint DCI {} configured, polling for reports",
-                                        kind, ctrl.hid_ep_dci
-                                    );
-                                }
-                            } else {
-                                crate::serial_println!("[XHCI] no HID interrupt-IN endpoint found");
-                            }
-                        }
-                    }
+                // Step 3a/3b-1: reset connected ports so they enable, then enumerate every enabled
+                // one (keyboard, mouse, …) — the device count is discovered from the hardware.
+                for (port, speed) in scan_ports(ctrl.op_base, max_ports, io) {
+                    ctrl.enumerate_port(port, speed, io);
                 }
+                crate::serial_println!("[XHCI] {} HID device(s) ready", ctrl.hid_devices.len());
                 *CONTROLLER.lock() = Some(ctrl);
                 Ok(())
             }
