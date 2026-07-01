@@ -23,10 +23,11 @@ modern laptops, which have no PS/2. Built on the driver model (WP-02) and the AP
   read the capability registers (CAPLENGTH, HCIVERSION, HCSPARAMS1 → max ports/slots) and log.
 - [x] **Step 2 — Controller bring-up.** Reset the controller; set up the Device Context Base
   Address Array, the Command Ring, the Event Ring, and the run/stop + interrupter registers; run.
-- [~] **Step 3 — Port + device enumeration.** (3a) detect ports; (3b-1) reset to enable; (3b-2)
-  command/event ring via Enable Slot → slot id; (3c-1 done) Input/Slot/EP0 contexts + EP0 ring +
-  Device Context + **Address Device** → device addressed. (3c-2 todo) GET_DESCRIPTOR via a control
-  transfer on EP0. Context size read from HCCPARAMS1.CSZ (never assumed).
+- [x] **Step 3 — Port + device enumeration.** (3a) detect ports; (3b-1) reset to enable; (3b-2)
+  command/event ring via Enable Slot → slot id; (3c-1) Input/Slot/EP0 contexts + EP0 ring +
+  Device Context + **Address Device** → device addressed; (3c-2) **GET_DESCRIPTOR** via a control
+  transfer on EP0 → vendor/product/class/bMaxPacketSize0. Context size read from HCCPARAMS1.CSZ
+  (never assumed).
 - [ ] **Step 4 — HID boot protocol.** Set boot protocol; poll/interrupt the keyboard and mouse
   endpoints; translate HID reports into unified `InputEvent`s.
 - [ ] **Step 5 — Interrupt-driven.** Route the xHCI interrupt (MSI, or its IO-APIC GSI) so input
@@ -45,33 +46,37 @@ succeeding.
   QEMU+OVMF (q35, `-device qemu-xhci -device usb-kbd -device usb-mouse`) →
   `HCIVERSION=0x0100 CAPLENGTH=64 slots=64 ports=8` at MMIO `0xc000000000`; bound `1b36:000d` →
   `xhci`. Found and fixed a real bug on the way (see below).
+- **Steps 2, 3a, 3b done.** Controller brought up (`op=0xc000000040 runtime=0xc000001000
+  doorbell=0xc000002000 slots_enabled=64`); ports scanned/reset (`port 5,6: High, enabled`);
+  Enable Slot → `slot id 1`; Address Device OK (`slot 1 on port 5 is addressed`).
+- **Step 3c-2 done.** GET_DESCRIPTOR control transfer on EP0 (Setup→Data-IN→Status-OUT + EP0
+  doorbell, wait Transfer Event cc=1) →
+  `device descriptor: vendor=0x0627 product=0x0001 class=0x00 bMaxPacketSize0=64`. Values read
+  from the device, 0 faults, boot reaches `QaOS ready`.
 
 ## Continuation notes (technical — resume here)
 
-State: `xhci.rs` has a `Xhci` controller in `CONTROLLER: Mutex<Option<Xhci>>`, brought up and with
-one device **addressed** (fields `ep0_ring_phys/virt`, `ep0_enqueue`, `ep0_cycle`, `dev_slot`,
-`context_size`, `dcbaa_virt`, `doorbell_base`, `runtime_base`). Command ring + event ring helpers
-exist: `submit_command(d0,d1,d2,d3_extra,type,io)`, `poll_event → (type,cc,slot)`,
-`wait_command_completion`. MMIO via `io: &mut dyn DeviceIo` (mmio_read32/write32); DMA pages via
-`alloc_dma_page() -> (phys, virt)`; `read64_lo_hi_write(io, addr, val)` for 64-bit regs.
+State: `xhci.rs` has a `Xhci` controller in `CONTROLLER: Mutex<Option<Xhci>>`, brought up, with one
+device **addressed** and its **device descriptor read**. Helpers now exist for both the command
+ring (`submit_command`, `wait_command_completion`) and the EP0 transfer ring
+(`ep0_enqueue_trb(d0,d1,d2,d3_extra,type)`, `ring_ep0_doorbell(io)`, `wait_transfer_completion(io)`,
+and the full `get_device_descriptor(io) -> DeviceDescriptor`). `poll_event → (type,cc,slot)` drains
+both Command Completion (33) and Transfer (32) events. MMIO via `io: &mut dyn DeviceIo`; DMA pages
+via `alloc_dma_page() -> (phys, virt)`; `read64_lo_hi_write` for 64-bit regs. Fields to reuse:
+`ep0_ring_virt/phys`, `ep0_enqueue`, `ep0_cycle`, `dev_slot`, `context_size`, `dcbaa_virt`.
 
-**Step 3c-2 — GET_DESCRIPTOR (control transfer on EP0).** On the device's EP0 transfer ring
-(`ep0_ring_virt`, tracking `ep0_enqueue`/`ep0_cycle`) enqueue three TRBs:
-- **Setup Stage** (TRB type 2): the 8-byte USB Setup packet in dwords 0–1
-  (`bmRequestType=0x80, bRequest=6 GET_DESCRIPTOR, wValue=0x0100 device-descriptor, wIndex=0,
-  wLength=18`), dword2 = 8 (transfer length), dword3 = `(2<<10)|cycle | (3<<16 TRT=IN-data) | (1<<6 IDT)`.
-- **Data Stage** (TRB type 3): dword0/1 = physical addr of an 18-byte DMA buffer, dword2 = 18,
-  dword3 = `(3<<10)|cycle | (1<<16 DIR=IN)`.
-- **Status Stage** (TRB type 4): dword3 = `(4<<10)|cycle | (0<<16 DIR=OUT) | (1<<5 IOC)`.
-Then ring the **device doorbell**: `io.mmio_write32(doorbell_base + dev_slot*4, 1)` (DB target 1 =
-EP0). Poll the event ring for a **Transfer Event (type 32)**, cc==1. Read the 18 bytes: idVendor
-@8 (u16), idProduct @10, bDeviceClass @4, bMaxPacketSize0 @7. Log them. (Refine EP0 MaxPacketSize
-via an Evaluate Context if bMaxPacketSize0 differs — optional.)
-
-**Step 4 — HID boot protocol.** Parse config descriptor for the HID interrupt-IN endpoint; issue
-SET_CONFIGURATION and SET_PROTOCOL(boot); configure that endpoint (Configure Endpoint command +
-its own transfer ring); poll it for 8-byte boot keyboard reports (byte0 modifiers, bytes2-7
-keycodes) / 3-byte mouse reports; translate to `crate::input::InputEvent` and push to the queue.
+**Step 4 — HID boot protocol (resume here).** Reuse the EP0 control-transfer path
+(`ep0_enqueue_trb` + `ring_ep0_doorbell` + `wait_transfer_completion`) for the standard requests:
+1. GET_DESCRIPTOR(configuration, wLength large enough) → parse for the HID **interrupt-IN**
+   endpoint: bEndpointAddress, wMaxPacketSize, bInterval, and the interface number/bNumConfigs.
+2. SET_CONFIGURATION(bConfigurationValue) (control transfer, no data stage).
+3. SET_PROTOCOL(boot=0) on the HID interface (`bmRequestType=0x21, bRequest=0x0B, wValue=0`).
+4. Configure that endpoint: build an Input Context adding the interrupt-IN EP (EPType=7 IN,
+   its own transfer ring), issue a **Configure Endpoint** command (TRB type 12).
+5. Queue a Normal TRB (type 1) with an 8-byte DMA buffer on that endpoint's ring, ring its doorbell
+   (DB target = the endpoint's DCI), and on the Transfer Event read the boot report (byte0
+   modifiers, bytes2–7 keycodes for keyboard; 3-byte for mouse). Translate to
+   `crate::input::InputEvent` and push to the queue. Poll for now; interrupt-drive in Step 5.
 
 **Step 5 — interrupt-driven.** Enable the xHCI interrupter (IMAN) and route its IRQ (the PCI
 `interrupt_line` via the IO-APIC, or MSI once E-12 lands) instead of polling.

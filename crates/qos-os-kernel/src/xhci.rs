@@ -80,9 +80,22 @@ pub struct Xhci {
 }
 
 /// TRB types we use.
+const TRB_SETUP_STAGE: u32 = 2;
+const TRB_DATA_STAGE: u32 = 3;
+const TRB_STATUS_STAGE: u32 = 4;
 const TRB_ENABLE_SLOT: u32 = 9;
 const TRB_ADDRESS_DEVICE: u32 = 11;
+const TRB_TRANSFER_EVENT: u32 = 32;
 const TRB_COMMAND_COMPLETION: u32 = 33;
+
+/// The 18-byte USB device descriptor, as returned by GET_DESCRIPTOR.
+#[derive(Clone, Copy, Default)]
+pub struct DeviceDescriptor {
+    pub usb_class: u8,
+    pub max_packet0: u8,
+    pub vendor: u16,
+    pub product: u16,
+}
 
 impl Xhci {
     /// Enqueue a command TRB (4 dwords) and ring the command doorbell. `d3_extra` carries
@@ -214,6 +227,79 @@ impl Xhci {
             None => {
                 crate::serial_println!("[XHCI] address-device: timeout");
                 false
+            }
+        }
+    }
+
+    /// Enqueue one TRB (4 dwords) onto the addressed device's EP0 transfer ring, OR-ing in the TRB
+    /// type and the current cycle bit. Single-descriptor use — three TRBs fit well within one page,
+    /// so no Link-TRB / wrap handling yet.
+    fn ep0_enqueue_trb(&mut self, d0: u32, d1: u32, d2: u32, d3_extra: u32, trb_type: u32) {
+        let trb = self.ep0_ring_virt + (self.ep0_enqueue * 16) as u64;
+        unsafe {
+            core::ptr::write_volatile(trb as *mut u32, d0);
+            core::ptr::write_volatile((trb + 4) as *mut u32, d1);
+            core::ptr::write_volatile((trb + 8) as *mut u32, d2);
+            core::ptr::write_volatile((trb + 12) as *mut u32, d3_extra | (trb_type << 10) | self.ep0_cycle);
+        }
+        self.ep0_enqueue += 1;
+    }
+
+    /// Ring the device's EP0 doorbell (DB target 1 = the default control endpoint, DCI 1).
+    fn ring_ep0_doorbell(&self, io: &mut dyn DeviceIo) {
+        io.mmio_write32(self.doorbell_base + self.dev_slot as u64 * 4, 1);
+    }
+
+    /// Wait for the next Transfer Event, draining intervening events. Returns the completion code,
+    /// or `None` on timeout.
+    fn wait_transfer_completion(&mut self, io: &mut dyn DeviceIo) -> Option<u32> {
+        for _ in 0..32 {
+            match self.poll_event(io) {
+                Some((TRB_TRANSFER_EVENT, cc, _)) => return Some(cc),
+                Some(_) => continue,
+                None => return None,
+            }
+        }
+        None
+    }
+
+    /// Read the 18-byte USB device descriptor via a control transfer on EP0 (WP-04 step 3c-2):
+    /// Setup (GET_DESCRIPTOR, device, len 18) → Data-IN → Status-OUT, then ring the EP0 doorbell and
+    /// wait for the Transfer Event. Returns vendor/product/class/bMaxPacketSize0 on success.
+    fn get_device_descriptor(&mut self, io: &mut dyn DeviceIo) -> Option<DeviceDescriptor> {
+        let (buf_phys, buf_virt) = alloc_dma_page()?;
+
+        // Setup Stage: the 8-byte USB Setup packet lives in dwords 0-1 (IDT=1). bmRequestType=0x80
+        // (device-to-host, standard, device), bRequest=6 (GET_DESCRIPTOR), wValue=0x0100 (device
+        // descriptor, index 0), wIndex=0, wLength=18.
+        let setup_d0 = 0x80u32 | (6 << 8) | (0x0100u32 << 16);
+        let setup_d1 = 18u32 << 16;
+        // dword3: IDT (bit 6), TRT=3 (IN data stage) in bits [17:16].
+        self.ep0_enqueue_trb(setup_d0, setup_d1, 8, (1 << 6) | (3 << 16), TRB_SETUP_STAGE);
+        // Data Stage: buffer address (64-bit), length 18, DIR=IN (bit 16).
+        self.ep0_enqueue_trb(buf_phys as u32, (buf_phys >> 32) as u32, 18, 1 << 16, TRB_DATA_STAGE);
+        // Status Stage: opposite direction (OUT), IOC (bit 5) so we get a Transfer Event.
+        self.ep0_enqueue_trb(0, 0, 0, 1 << 5, TRB_STATUS_STAGE);
+
+        self.ring_ep0_doorbell(io);
+        match self.wait_transfer_completion(io) {
+            Some(1) => {
+                let rd = |off: u64| unsafe { core::ptr::read_volatile((buf_virt + off) as *const u8) };
+                let rd16 = |off: u64| (rd(off) as u16) | ((rd(off + 1) as u16) << 8);
+                Some(DeviceDescriptor {
+                    usb_class: rd(4),
+                    max_packet0: rd(7),
+                    vendor: rd16(8),
+                    product: rd16(10),
+                })
+            }
+            Some(cc) => {
+                crate::serial_println!("[XHCI] get-descriptor completion code {}", cc);
+                None
+            }
+            None => {
+                crate::serial_println!("[XHCI] get-descriptor: timeout");
+                None
             }
         }
     }
@@ -451,6 +537,13 @@ impl Driver for XhciDriver {
                                 "[XHCI] Address Device OK: slot {} on port {} is addressed",
                                 slot, port
                             );
+                            // Step 3c-2: read the device descriptor over EP0.
+                            if let Some(d) = ctrl.get_device_descriptor(io) {
+                                crate::serial_println!(
+                                    "[XHCI] device descriptor: vendor={:#06x} product={:#06x} class={:#04x} bMaxPacketSize0={}",
+                                    d.vendor, d.product, d.usb_class, d.max_packet0
+                                );
+                            }
                         }
                     }
                 }
