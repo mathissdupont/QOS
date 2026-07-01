@@ -14,6 +14,9 @@ static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
+/// Local-APIC spurious interrupt vector (E-10). Any vector > 31; conventionally 0xFF.
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
@@ -59,6 +62,10 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
 
+        // Local-APIC spurious vector (E-10): fired by the APIC on rare conditions; needs a
+        // present IDT entry so it doesn't #GP, and requires NO end-of-interrupt.
+        idt[SPURIOUS_VECTOR].set_handler_fn(spurious_interrupt_handler);
+
         // Syscall entry point (Milestone 2): shared-memory ABI.
         idt[0x80]
             .set_handler_fn(syscall::syscall_interrupt_handler)
@@ -92,6 +99,10 @@ pub fn init_pics() {
 
     arch::enable_interrupts();
 }
+
+/// Local-APIC spurious interrupt (E-10). Per the SDM, no end-of-interrupt is sent for the
+/// spurious vector — just return.
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {}
 
 fn is_user_mode(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3

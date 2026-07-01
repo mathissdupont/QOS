@@ -37,6 +37,58 @@ fn read_sdt(phys: u64) -> Option<Vec<u8>> {
     Some(phys_read(phys, len))
 }
 
+// ── Local APIC (E-10 slice 2) ────────────────────────────────────────────────────────────────
+// Register offsets within the local-APIC MMIO page.
+mod lapic_reg {
+    pub const ID: u64 = 0x20;
+    pub const VERSION: u64 = 0x30;
+    pub const TPR: u64 = 0x80; // Task Priority Register
+    pub const EOI: u64 = 0xB0;
+    pub const SVR: u64 = 0xF0; // Spurious Interrupt Vector Register
+}
+
+/// IA32_APIC_BASE MSR: bit 11 = APIC global enable, bit 8 = BSP.
+const IA32_APIC_BASE: u32 = 0x1B;
+
+fn lapic_read(base_virt: u64, reg: u64) -> u32 {
+    unsafe { core::ptr::read_volatile((base_virt + reg) as *const u32) }
+}
+fn lapic_write(base_virt: u64, reg: u64, val: u32) {
+    unsafe { core::ptr::write_volatile((base_virt + reg) as *mut u32, val) }
+}
+
+/// Software-enable the local APIC (E-10 slice 2). This does **not** reroute any interrupts: the
+/// 8259 PIC keeps delivering the timer/keyboard/mouse IRQs. It only brings the local APIC online
+/// (global-enable via IA32_APIC_BASE, software-enable + spurious vector via the SVR) and drops the
+/// task priority so it will accept interrupts — the groundwork for the IO-APIC/APIC-timer slice.
+pub fn enable_local_apic(local_apic_phys: u64) {
+    // Ensure the global enable bit is set (firmware usually leaves it on under UEFI).
+    unsafe {
+        let mut msr = x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE);
+        let val = msr.read();
+        msr.write(val | (1 << 11));
+    }
+    let base = crate::memory::mmio_virt_addr(local_apic_phys).as_u64();
+    let id = lapic_read(base, lapic_reg::ID) >> 24;
+    let version = lapic_read(base, lapic_reg::VERSION) & 0xFF;
+    // Accept all interrupt priorities.
+    lapic_write(base, lapic_reg::TPR, 0);
+    // Software-enable (bit 8) with the spurious vector in the low byte.
+    lapic_write(base, lapic_reg::SVR, 0x100 | crate::interrupts::SPURIOUS_VECTOR as u32);
+    crate::serial_println!(
+        "[APIC] local APIC enabled: id={} version={:#x} svr={:#x}",
+        id,
+        version,
+        lapic_read(base, lapic_reg::SVR)
+    );
+}
+
+/// Signal end-of-interrupt to the local APIC (for APIC-delivered interrupts in later slices).
+pub fn eoi(local_apic_phys: u64) {
+    let base = crate::memory::mmio_virt_addr(local_apic_phys).as_u64();
+    lapic_write(base, lapic_reg::EOI, 0);
+}
+
 /// Result of discovery, cached for later slices (APIC enable, IRQ routing, SMP).
 #[derive(Clone, Debug, Default)]
 pub struct AcpiInfo {
@@ -115,6 +167,8 @@ pub fn init(rsdp_phys: u64) -> AcpiInfo {
                 m.irq_to_gsi(0),
                 m.irq_to_gsi(1)
             );
+            // Slice 2: bring the local APIC online (does not reroute IRQs; PIC still drives them).
+            enable_local_apic(m.local_apic_address);
         }
         None => crate::serial_println!("[APIC] MADT not found"),
     }
