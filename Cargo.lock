@@ -283,6 +283,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "qos-abi",
+ "qos-acpi",
  "qos-driver",
  "qos-gfx",
  "spin",
@@ -326,6 +327,10 @@ dependencies = [
  "serde",
  "serde_json",
 ]
+
+[[package]]
+name = "qos-acpi"
+version = "0.1.0"
 
 [[package]]
 name = "qos-core"

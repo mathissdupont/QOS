@@ -34,6 +34,7 @@ mod vga;
 mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
 mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
 mod device;     // Device/driver model integration (qos-driver) — ADR-0016, epic E-01
+mod apic;       // ACPI/APIC discovery (qos-acpi) — ADR-0015, epic E-10
 
 mod allocator;
 mod ata;
@@ -99,6 +100,9 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         );
     }
 
+    // The bootloader hands us the ACPI RSDP physical address (UEFI has no fixed BIOS location).
+    let rsdp_addr = boot_info.rsdp_addr.into_option();
+
     // Show boot splash screen (skip delay in verify mode)
     splash::show_splash();
     splash::show_progress("Initializing memory...");
@@ -132,6 +136,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     rtc::init();          // Real-Time Clock
     pci::init();          // PCI bus enumeration
     device::init();       // Device/driver model: match PCI devices to drivers (ADR-0016, additive)
+    if let Some(rsdp) = rsdp_addr {
+        apic::init(rsdp); // ACPI/APIC discovery: parse the MADT, log APIC topology (ADR-0015 E-10)
+    } else {
+        crate::serial_println!("[APIC] no RSDP from bootloader; APIC discovery skipped");
+    }
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
     // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
     syscall_ext::init();  // Extended syscalls
