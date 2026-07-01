@@ -30,10 +30,11 @@
 - **Test**: Boot log shows "Mouse: Scroll wheel detected (ID=3)"
 
 #### Display
-- ✅ VGA text mode (80x25, 16 colors)
+- ✅ UEFI linear framebuffer (bootloader 0.11) — text console + graphical desktop route here
+- ✅ VGA Mode 13h (320×200×256) fallback when no framebuffer is present
 - ✅ Serial console output
-- ⚠️ Framebuffer (placeholder - needs bootloader 0.11+)
-- **Test**: VGA output visible in QEMU/VNC
+- **Test**: boots to `QaOS ready` under QEMU+OVMF; `gdesk` renders the desktop fullscreen
+  (1280×800, 4× scale from the 320×200 logical canvas). See ADR-0014.
 
 #### Hardware Detection
 - ✅ RTC (Real-Time Clock) - Reads date/time
@@ -177,10 +178,9 @@
 
 ### ❌ NOT IMPLEMENTED / BLOCKED
 
-1. **VESA Framebuffer**
-   - ❌ Requires bootloader 0.11+ upgrade
-   - ❌ Current: bootloader 0.9.29 (no framebuffer API)
-   - 📝 Placeholder code exists
+1. ~~**VESA Framebuffer**~~ ✅ DONE
+   - ✅ Migrated to bootloader 0.11 (BIOS+UEFI); kernel gets a linear framebuffer
+   - ✅ Text console + graphical desktop render on it (ADR-0014 Stage 3)
 
 2. **AHCI / SATA**
    - ❌ Disabled (depends on ACPI)
