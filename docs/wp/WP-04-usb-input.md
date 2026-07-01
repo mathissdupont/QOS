@@ -23,10 +23,10 @@ modern laptops, which have no PS/2. Built on the driver model (WP-02) and the AP
   read the capability registers (CAPLENGTH, HCIVERSION, HCSPARAMS1 → max ports/slots) and log.
 - [x] **Step 2 — Controller bring-up.** Reset the controller; set up the Device Context Base
   Address Array, the Command Ring, the Event Ring, and the run/stop + interrupter registers; run.
-- [~] **Step 3 — Port + device enumeration.** (3a done) Detect connected ports; (3b-1 done) reset
-  them to enable; (3b-2 done) command/event-ring machinery proven via Enable Slot → slot id.
-  (3c todo) build the input/device context, Address Device, and read descriptors via control
-  transfers on EP0.
+- [~] **Step 3 — Port + device enumeration.** (3a) detect ports; (3b-1) reset to enable; (3b-2)
+  command/event ring via Enable Slot → slot id; (3c-1 done) Input/Slot/EP0 contexts + EP0 ring +
+  Device Context + **Address Device** → device addressed. (3c-2 todo) GET_DESCRIPTOR via a control
+  transfer on EP0. Context size read from HCCPARAMS1.CSZ (never assumed).
 - [ ] **Step 4 — HID boot protocol.** Set boot protocol; poll/interrupt the keyboard and mouse
   endpoints; translate HID reports into unified `InputEvent`s.
 - [ ] **Step 5 — Interrupt-driven.** Route the xHCI interrupt (MSI, or its IO-APIC GSI) so input
