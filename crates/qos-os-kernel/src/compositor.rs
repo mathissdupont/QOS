@@ -8,6 +8,8 @@
 //! Opt-in for now via the `modern` shell command (fallback-first, ADR-0015): it does not replace
 //! the legacy desktop until the toolkit is ready.
 
+use alloc::format;
+use alloc::string::{String, ToString};
 use alloc::vec;
 use alloc::vec::Vec;
 
@@ -67,6 +69,149 @@ struct Win {
     kind: AppKind,
 }
 
+/// Translate a PS/2 Set-1 make scancode to a character (honoring shift). `None` for non-text keys.
+fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
+    // Letters (Set-1) → lowercase; shift makes them uppercase.
+    let letter = match sc {
+        0x10 => 'q', 0x11 => 'w', 0x12 => 'e', 0x13 => 'r', 0x14 => 't', 0x15 => 'y', 0x16 => 'u',
+        0x17 => 'i', 0x18 => 'o', 0x19 => 'p', 0x1E => 'a', 0x1F => 's', 0x20 => 'd', 0x21 => 'f',
+        0x22 => 'g', 0x23 => 'h', 0x24 => 'j', 0x25 => 'k', 0x26 => 'l', 0x2C => 'z', 0x2D => 'x',
+        0x2E => 'c', 0x2F => 'v', 0x30 => 'b', 0x31 => 'n', 0x32 => 'm', _ => '\0',
+    };
+    if letter != '\0' {
+        return Some(if shift { letter.to_ascii_uppercase() } else { letter });
+    }
+    let c = match sc {
+        0x02..=0x0B => {
+            let base = [b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0'];
+            let sh = [b'!', b'@', b'#', b'$', b'%', b'^', b'&', b'*', b'(', b')'];
+            let i = (sc - 0x02) as usize;
+            (if shift { sh[i] } else { base[i] }) as char
+        }
+        0x39 => ' ',
+        0x0C => if shift { '_' } else { '-' },
+        0x0D => if shift { '+' } else { '=' },
+        0x1A => if shift { '{' } else { '[' },
+        0x1B => if shift { '}' } else { ']' },
+        0x27 => if shift { ':' } else { ';' },
+        0x28 => if shift { '"' } else { '\'' },
+        0x29 => if shift { '~' } else { '`' },
+        0x2B => if shift { '|' } else { '\\' },
+        0x33 => if shift { '<' } else { ',' },
+        0x34 => if shift { '>' } else { '.' },
+        0x35 => if shift { '?' } else { '/' },
+        _ => return None,
+    };
+    Some(c)
+}
+
+/// An in-window terminal: a scrollback buffer + an input line, with a small real command set that
+/// reaches actual subsystems (the quantum simulator, heap/uptime). This is the flagship of the
+/// "real, working apps" step (WP-05 step 5) and the first user-facing bridge to the quantum layer.
+struct Terminal {
+    lines: Vec<String>,
+    input: String,
+}
+
+impl Terminal {
+    fn new() -> Self {
+        let mut t = Terminal { lines: Vec::new(), input: String::new() };
+        t.push("QOS Terminal — type 'help'.".to_string());
+        t
+    }
+
+    fn push(&mut self, s: String) {
+        self.lines.push(s);
+        if self.lines.len() > 256 {
+            self.lines.remove(0);
+        }
+    }
+
+    fn type_char(&mut self, c: char) {
+        if self.input.len() < 100 {
+            self.input.push(c);
+        }
+    }
+
+    fn backspace(&mut self) {
+        self.input.pop();
+    }
+
+    fn enter(&mut self) {
+        let cmd = core::mem::take(&mut self.input);
+        self.push(format!("qos:\\> {}", cmd));
+        self.run(&cmd);
+    }
+
+    /// Execute one command line against real subsystems.
+    fn run(&mut self, line: &str) {
+        let line = line.trim();
+        let (name, rest) = match line.split_once(' ') {
+            Some((a, b)) => (a, b.trim()),
+            None => (line, ""),
+        };
+        match name {
+            "" => {}
+            "help" => {
+                for l in [
+                    "commands:",
+                    "  help clear echo ver mem",
+                    "  bell            2-qubit Bell state, 1000 shots",
+                    "  ghz             3-qubit GHZ state, 1000 shots",
+                    "  qrng [n]        n quantum random bits (default 8)",
+                ] {
+                    self.push(l.to_string());
+                }
+            }
+            "clear" => self.lines.clear(),
+            "echo" => self.push(rest.to_string()),
+            "ver" => self.push("QOS 0.1 — UEFI x86-64, native compositor UI, quantum control plane".to_string()),
+            "mem" => {
+                let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                self.push(format!("heap {} MiB   uptime {} ticks (~{} s)", crate::allocator::HEAP_SIZE / 1024 / 1024, ticks, ticks / 100));
+            }
+            "bell" => {
+                let (z, o) = crate::quantum::sim::run_bell(1000);
+                self.push(format!("Bell |Φ+> x1000:   00 -> {}    11 -> {}", z, o));
+                self.push(format!("(entangled: {}% correlated)", (z + o) * 100 / 1000));
+            }
+            "ghz" => self.run_qasm(
+                b"OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\nmeasure q[0]->c[0];\nmeasure q[1]->c[1];\nmeasure q[2]->c[2];\n",
+                1000,
+                "GHZ |000>+|111>",
+            ),
+            "qrng" => {
+                let n = rest.parse::<usize>().unwrap_or(8).clamp(1, 16);
+                let mut bits = String::new();
+                for _ in 0..n {
+                    let (_z, o) = {
+                        let r = crate::quantum::sim::run_qasm2(b"OPENQASM 2.0;\nqreg q[1];\ncreg c[1];\nh q[0];\nmeasure q[0]->c[0];\n", 1);
+                        match r {
+                            Ok(res) => (res.count_zeros(), res.count_ones()),
+                            Err(_) => (1, 0),
+                        }
+                    };
+                    bits.push(if o > 0 { '1' } else { '0' });
+                }
+                self.push(format!("quantum random: {}", bits));
+            }
+            _ => self.push(format!("unknown command: {}   (try help)", name)),
+        }
+    }
+
+    fn run_qasm(&mut self, qasm: &[u8], shots: u64, label: &str) {
+        match crate::quantum::sim::run_qasm2(qasm, shots) {
+            Ok(res) => {
+                self.push(format!("{} x{}:", label, shots));
+                for (k, v) in res.counts.iter() {
+                    self.push(format!("  {} -> {}", k, v));
+                }
+            }
+            Err(_) => self.push("quantum: parse error".to_string()),
+        }
+    }
+}
+
 /// 11×16 arrow-cursor bitmap: `#` = dark outline, `o` = white fill, `.` = transparent.
 const CURSOR: [&str; 16] = [
     "#..........",
@@ -99,6 +244,8 @@ struct Desktop {
     /// When dirty, `full` = blit the whole screen; otherwise `damage` = the sub-rect to blit.
     full: bool,
     damage: Rect,
+    /// The working terminal (shared by the Terminal window).
+    term: Terminal,
 }
 
 /// Margin around a window rect that its shadow extends into (for damage rects).
@@ -121,6 +268,23 @@ impl Desktop {
             dirty: true,
             full: true,
             damage: Rect::new(0, 0, 0, 0),
+            term: Terminal::new(),
+        }
+    }
+
+    /// True if the focused (topmost) window is the Terminal — then typed keys go to it.
+    fn top_is_terminal(&self) -> bool {
+        self.wins.last().map_or(false, |w| w.kind == AppKind::Terminal)
+    }
+
+    /// Mark just the focused window's footprint (plus shadow) dirty — used for terminal typing so a
+    /// keystroke doesn't repaint the whole screen.
+    fn mark_top_window(&mut self) {
+        if let Some(w) = self.wins.last() {
+            let r = w.rect;
+            self.mark_region(r.inflate(SHADOW_MARGIN));
+        } else {
+            self.mark_full();
         }
     }
 
@@ -262,11 +426,23 @@ impl Desktop {
         let by = r.y + HEADER_H + 30;
         match kind {
             AppKind::Terminal => {
-                s.rounded_rect(Rect::new(r.x + 12, r.y + HEADER_H + 10, r.w - 24, r.h - HEADER_H - 22), 8, qos_ui::rgb(0x10, 0x12, 0x18));
-                fr.draw_text(s, bx, by + 8, "qos:\\> run bell.qasm", 15.0, qos_ui::rgb(0x6e, 0xe0, 0x7a));
-                fr.draw_text(s, bx, by + 34, "measuring 2 qubits...", 15.0, theme.text_dim);
-                fr.draw_text(s, bx, by + 60, "00 -> 512   11 -> 512", 15.0, theme.text);
-                fr.draw_text(s, bx, by + 90, "qos:\\> _", 15.0, qos_ui::rgb(0x6e, 0xe0, 0x7a));
+                let inner = Rect::new(r.x + 12, r.y + HEADER_H + 10, r.w - 24, r.h - HEADER_H - 22);
+                s.rounded_rect(inner, 8, qos_ui::rgb(0x10, 0x12, 0x18));
+                let green = qos_ui::rgb(0x6e, 0xe0, 0x7a);
+                let line_h = 20;
+                let tx = inner.x + 14;
+                let rows = ((inner.h - 20) / line_h).max(1) as usize;
+                // Show the last `rows-1` scrollback lines, then the live input line with a cursor.
+                let total = self.term.lines.len();
+                let start = total.saturating_sub(rows - 1);
+                let mut ty = inner.y + 24;
+                for line in &self.term.lines[start..] {
+                    let col = if line.starts_with("qos:\\>") { green } else { theme.text };
+                    fr.draw_text(s, tx, ty, line, 14.0, col);
+                    ty += line_h;
+                }
+                let prompt = format!("qos:\\> {}_", self.term.input);
+                fr.draw_text(s, tx, ty, &prompt, 14.0, green);
             }
             AppKind::Files => {
                 for (j, name) in ["Documents", "quantum", "readme.txt", "bell.qasm"].iter().enumerate() {
@@ -640,6 +816,7 @@ pub fn run_demo() {
     desk.dirty = false;
     desk.full = false;
     desk.damage = Rect::new(0, 0, 0, 0);
+    let mut shift = false;
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
@@ -648,27 +825,58 @@ pub fn run_demo() {
         crate::xhci::poll();
         while let Some(ev) = crate::input::poll() {
             match ev {
-                InputEvent::Key { scancode, pressed: true } => match scancode {
-                    0x01 => {
+                InputEvent::Key { scancode, pressed } => {
+                    // Track Shift (either side) from both press and release.
+                    if scancode & 0x7F == 0x2A || scancode & 0x7F == 0x36 {
+                        shift = pressed;
+                        continue;
+                    }
+                    if !pressed {
+                        continue;
+                    }
+                    if scancode == 0x01 {
                         crate::framebuffer::clear(0x000000);
                         crate::framebuffer::reset_cursor();
-                        return; // Esc → shell
+                        return; // Esc → shell (from anywhere)
                     }
-                    0x14 => {
-                        desk.theme = desk.theme.toggled();
-                        desk.mark_full();
-                    } // t
-                    0x02 => desk.open_app(AppKind::Terminal), // 1
-                    0x03 => desk.open_app(AppKind::Files),    // 2
-                    0x04 => desk.open_app(AppKind::Quantum),  // 3
-                    0x05 => desk.open_app(AppKind::Settings), // 4
-                    0x11 => {
-                        if desk.wins.pop().is_some() {
-                            desk.mark_full();
+                    if desk.top_is_terminal() {
+                        // Focused Terminal captures typing.
+                        match scancode {
+                            0x0E => {
+                                desk.term.backspace();
+                                desk.mark_top_window();
+                            } // Backspace
+                            0x1C => {
+                                desk.term.enter();
+                                desk.mark_top_window();
+                            } // Enter
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    desk.term.type_char(c);
+                                    desk.mark_top_window();
+                                }
+                            }
                         }
-                    } // w → close focused
-                    _ => {}
-                },
+                    } else {
+                        // Desktop shortcuts when no terminal is focused.
+                        match scancode {
+                            0x14 => {
+                                desk.theme = desk.theme.toggled();
+                                desk.mark_full();
+                            } // t
+                            0x02 => desk.open_app(AppKind::Terminal), // 1
+                            0x03 => desk.open_app(AppKind::Files),    // 2
+                            0x04 => desk.open_app(AppKind::Quantum),  // 3
+                            0x05 => desk.open_app(AppKind::Settings), // 4
+                            0x11 => {
+                                if desk.wins.pop().is_some() {
+                                    desk.mark_full();
+                                }
+                            } // w → close focused
+                            _ => {}
+                        }
+                    }
+                }
                 InputEvent::MouseMove { dx, dy } => desk.on_mouse_move(dx, dy),
                 InputEvent::MouseButton { button: MouseButton::Left, pressed } => {
                     if pressed {
