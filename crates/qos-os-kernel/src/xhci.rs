@@ -162,6 +162,40 @@ fn bring_up(cap_base: u64, io: &mut dyn DeviceIo) -> Result<Xhci, &'static str> 
     })
 }
 
+/// Human name for the xHCI PORTSC port-speed id (bits [13:10]).
+fn speed_name(speed: u32) -> &'static str {
+    match speed {
+        1 => "Full",
+        2 => "Low",
+        3 => "High",
+        4 => "SuperSpeed",
+        5 => "SuperSpeedPlus",
+        _ => "?",
+    }
+}
+
+/// Scan the root-hub ports (WP-04 step 3a): read each PORTSC and log which ports have a device
+/// connected and at what speed. PORTSC for port `i` (1-based) is at op_base + 0x400 + (i-1)*0x10.
+/// Returns the number of connected ports found.
+fn scan_ports(op_base: u64, max_ports: u32, io: &mut dyn DeviceIo) -> u32 {
+    let mut connected = 0;
+    for port in 1..=max_ports {
+        let portsc = io.mmio_read32(op_base + 0x400 + (port as u64 - 1) * 0x10);
+        let ccs = portsc & 1; // Current Connect Status
+        if ccs != 0 {
+            connected += 1;
+            let enabled = (portsc >> 1) & 1;
+            let speed = (portsc >> 10) & 0xF;
+            crate::serial_println!(
+                "[XHCI] port {}: device connected, speed={} ({}), enabled={}",
+                port, speed, speed_name(speed), enabled
+            );
+        }
+    }
+    crate::serial_println!("[XHCI] port scan: {}/{} ports have a device", connected, max_ports);
+    connected
+}
+
 pub struct XhciDriver;
 
 impl Driver for XhciDriver {
@@ -196,6 +230,8 @@ impl Driver for XhciDriver {
                     "[XHCI] running: op={:#x} runtime={:#x} doorbell={:#x} slots_enabled={}",
                     ctrl.op_base, ctrl.runtime_base, ctrl.doorbell_base, ctrl.max_slots
                 );
+                // Step 3a: see which root-hub ports have a device attached.
+                scan_ports(ctrl.op_base, max_ports, io);
                 *CONTROLLER.lock() = Some(ctrl);
                 Ok(())
             }
