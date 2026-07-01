@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/qos-abi",
+  "crates/qos-gfx",          # Portable, resolution-agnostic drawing math (palette + scale). See ADR-0014.
   "crates/qos-core",         # Portable control-plane core (no_std + alloc; std feature). See ADR-0003.
   # "crates/qosd",           # Disabled: daemon for host, uses std (re-enable with ADR-0011)
   # "crates/qos-pybridge",   # Disabled: Python bridge, uses std

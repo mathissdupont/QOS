@@ -57,7 +57,7 @@ From the shell (or run with `./run-qos.ps1 -Build -Serial` to watch the output):
 
 | Command | What it demonstrates |
 |---|---|
-| `gdesk` | Graphical desktop (Q = Quantum Lab, R = run, M = Task Monitor, A = About, F = Files, ESC = exit) |
+| `gdesk` | Graphical desktop (Q = Quantum Lab, R = run, M = Task Monitor, F = Files, D = Display, A = About, ESC = exit). Renders on the UEFI/VESA linear framebuffer (scaled from 320×200), falling back to VGA Mode 13h. |
 | `threadtest` | Preemptive context switching between two kernel threads |
 | `proctest` | Two isolated Ring-3 processes preempted concurrently |
 | `faulttest` | A crashing process is killed; the kernel and other processes survive |

@@ -32,6 +32,7 @@ mod user; // ✅ ENABLED: LLVM bug fixed with Docker Linux environment
 mod ui;
 mod vga;
 mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
+mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
 
 mod allocator;
 mod ata;
@@ -67,7 +68,10 @@ use bootloader_api::config::Mapping;
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config.kernel_stack_size = 256 * 1024; // 256 KiB
+    // 1 MiB: the kernel materializes large structs on the stack during init (e.g. the E1000
+    // driver's ~128 KiB rx/tx buffer struct). 256 KiB overflowed into the stack guard page and
+    // double-faulted on UEFI. See ADR-0014.
+    config.kernel_stack_size = 1024 * 1024; // 1 MiB
     config
 };
 

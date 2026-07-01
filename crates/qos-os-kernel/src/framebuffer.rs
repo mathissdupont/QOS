@@ -121,11 +121,15 @@ fn put_pixel_internal(fb: &mut FrameBufferWrapper, x: usize, y: usize, color: u3
     }
 }
 
-/// Draw a filled rectangle
+/// Draw a filled rectangle. Locks the framebuffer once and writes every pixel under that single
+/// lock — the desktop paints large scaled rectangles, so per-pixel locking here is a real cost.
 pub fn fill_rect(x: usize, y: usize, width: usize, height: usize, color: u32) {
-    for dy in 0..height {
-        for dx in 0..width {
-            put_pixel(x + dx, y + dy, color);
+    let mut fb = FRAMEBUFFER.lock();
+    if let Some(ref mut fb) = *fb {
+        for dy in 0..height {
+            for dx in 0..width {
+                put_pixel_internal(fb, x + dx, y + dy, color);
+            }
         }
     }
 }

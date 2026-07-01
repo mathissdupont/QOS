@@ -283,6 +283,7 @@ dependencies = [
  "pc-keyboard",
  "pic8259",
  "qos-abi",
+ "qos-gfx",
  "spin",
  "x86_64",
 ]
@@ -335,6 +336,10 @@ dependencies = [
  "serde_json",
  "spin",
 ]
+
+[[package]]
+name = "qos-gfx"
+version = "0.1.0"
 
 [[package]]
 name = "qos-image"
