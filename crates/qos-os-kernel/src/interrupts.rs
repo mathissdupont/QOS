@@ -23,6 +23,22 @@ pub const APIC_TIMER_VECTOR: u8 = 0x40;
 /// the PIC). Set by `apic::start_apic_timer_100hz`.
 pub static APIC_TIMER: AtomicBool = AtomicBool::new(false);
 
+/// True once external IRQs (keyboard/mouse) are delivered through the IO-APIC and the 8259 PIC is
+/// masked off. Their EOI then goes to the local APIC. Set by `apic::start_ioapic_routing`.
+pub static IOAPIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// End-of-interrupt for an external device IRQ: to the local APIC once the IO-APIC drives it,
+/// otherwise to the 8259 PIC. `pic_vector` is the device's PIC vector (used only in PIC mode).
+pub fn eoi_external(pic_vector: u8) {
+    if IOAPIC_ACTIVE.load(Ordering::SeqCst) {
+        crate::apic::eoi();
+    } else {
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(pic_vector);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
@@ -285,10 +301,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
             if CTRL_DOWN.load(Ordering::Relaxed) {
                 // A foreground scheduled process can be interrupted even if we're currently
                 // running the shell (kernel mode).
-                unsafe {
-                    PICS.lock()
-                        .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-                }
+                eoi_external(InterruptIndex::Keyboard.as_u8());
 
                 let fg = crate::tasking::foreground_pid();
                 if fg != 0 {
@@ -311,17 +324,11 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
 
     keyboard::push_scancode(scancode);
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    eoi_external(InterruptIndex::Keyboard.as_u8());
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::mouse::handle_interrupt();
-    
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
-    }
+
+    eoi_external(InterruptIndex::Mouse.as_u8());
 }

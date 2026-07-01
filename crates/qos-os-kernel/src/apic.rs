@@ -159,6 +159,60 @@ pub fn start_apic_timer_100hz() {
     crate::serial_println!("[APIC] timer active: {} ticks in ~100ms (PIT masked)", advanced);
 }
 
+// ── IO-APIC (E-10 slice 3b) ──────────────────────────────────────────────────────────────────
+
+fn ioapic_write(base_virt: u64, reg: u32, val: u32) {
+    unsafe {
+        core::ptr::write_volatile(base_virt as *mut u32, reg); // IOREGSEL
+        core::ptr::write_volatile((base_virt + 0x10) as *mut u32, val); // IOWIN
+    }
+}
+
+/// Program one IO-APIC redirection entry to deliver `gsi` as `vector` to local-APIC `dest`,
+/// unmasked, fixed/physical/edge/active-high (the defaults for ISA IRQs).
+fn ioapic_route(base_virt: u64, gsi: u32, gsi_base: u32, vector: u8, dest: u8) {
+    let idx = gsi.wrapping_sub(gsi_base);
+    let low_reg = 0x10 + 2 * idx;
+    let high_reg = low_reg + 1;
+    ioapic_write(base_virt, high_reg, (dest as u32) << 24);
+    ioapic_write(base_virt, low_reg, vector as u32); // all flag bits 0 → fixed/phys/edge/unmasked
+}
+
+/// Route the external device IRQs (keyboard, mouse) through the IO-APIC to the local APIC, then
+/// mask the 8259 PIC entirely (E-10 slice 3b). After this the legacy PIC is out of the picture
+/// and interrupts follow the modern APIC path — the architecture USB and SMP build on.
+pub fn start_ioapic_routing(madt: &Madt) {
+    let (io_id, io_addr, gsi_base) = match madt.first_io_apic() {
+        Some(t) => t,
+        None => {
+            crate::serial_println!("[APIC] no IO-APIC in MADT; keeping PIC for external IRQs");
+            return;
+        }
+    };
+    let base = crate::memory::mmio_virt_addr(io_addr as u64).as_u64();
+    let dest = 0u8; // deliver to the BSP (local APIC id 0)
+
+    let kbd_gsi = madt.irq_to_gsi(1);
+    let mouse_gsi = madt.irq_to_gsi(12);
+    let kbd_vec = crate::interrupts::InterruptIndex::Keyboard.as_u8();
+    let mouse_vec = crate::interrupts::InterruptIndex::Mouse.as_u8();
+
+    // Switch external-IRQ EOI to the APIC and take the PIC fully offline before unmasking the
+    // IO-APIC entries, so each line is delivered by exactly one controller.
+    crate::interrupts::IOAPIC_ACTIVE.store(true, core::sync::atomic::Ordering::SeqCst);
+    unsafe {
+        crate::arch::outb(0x21, 0xFF); // mask all master PIC IRQs
+        crate::arch::outb(0xA1, 0xFF); // mask all slave PIC IRQs
+    }
+    ioapic_route(base, kbd_gsi, gsi_base, kbd_vec, dest);
+    ioapic_route(base, mouse_gsi, gsi_base, mouse_vec, dest);
+
+    crate::serial_println!(
+        "[APIC] IO-APIC id={} routing: keyboard GSI{}->vec{:#x}, mouse GSI{}->vec{:#x}; 8259 PIC masked",
+        io_id, kbd_gsi, kbd_vec, mouse_gsi, mouse_vec
+    );
+}
+
 /// Result of discovery, cached for later slices (APIC enable, IRQ routing, SMP).
 #[derive(Clone, Debug, Default)]
 pub struct AcpiInfo {
@@ -239,8 +293,10 @@ pub fn init(rsdp_phys: u64) -> AcpiInfo {
             );
             // Slice 2: bring the local APIC online (does not reroute IRQs; PIC still drives them).
             enable_local_apic(m.local_apic_address);
-            // Slice 3: move the scheduler tick from the PIT to the local-APIC timer.
+            // Slice 3a: move the scheduler tick from the PIT to the local-APIC timer.
             start_apic_timer_100hz();
+            // Slice 3b: route keyboard/mouse through the IO-APIC and mask the 8259 PIC entirely.
+            start_ioapic_routing(m);
         }
         None => crate::serial_println!("[APIC] MADT not found"),
     }
