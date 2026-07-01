@@ -263,26 +263,53 @@ impl Xhci {
         None
     }
 
-    /// Read the 18-byte USB device descriptor via a control transfer on EP0 (WP-04 step 3c-2):
-    /// Setup (GET_DESCRIPTOR, device, len 18) → Data-IN → Status-OUT, then ring the EP0 doorbell and
-    /// wait for the Transfer Event. Returns vendor/product/class/bMaxPacketSize0 on success.
-    fn get_device_descriptor(&mut self, io: &mut dyn DeviceIo) -> Option<DeviceDescriptor> {
-        let (buf_phys, buf_virt) = alloc_dma_page()?;
-
-        // Setup Stage: the 8-byte USB Setup packet lives in dwords 0-1 (IDT=1). bmRequestType=0x80
-        // (device-to-host, standard, device), bRequest=6 (GET_DESCRIPTOR), wValue=0x0100 (device
-        // descriptor, index 0), wIndex=0, wLength=18.
-        let setup_d0 = 0x80u32 | (6 << 8) | (0x0100u32 << 16);
-        let setup_d1 = 18u32 << 16;
-        // dword3: IDT (bit 6), TRT=3 (IN data stage) in bits [17:16].
-        self.ep0_enqueue_trb(setup_d0, setup_d1, 8, (1 << 6) | (3 << 16), TRB_SETUP_STAGE);
-        // Data Stage: buffer address (64-bit), length 18, DIR=IN (bit 16).
-        self.ep0_enqueue_trb(buf_phys as u32, (buf_phys >> 32) as u32, 18, 1 << 16, TRB_DATA_STAGE);
-        // Status Stage: opposite direction (OUT), IOC (bit 5) so we get a Transfer Event.
-        self.ep0_enqueue_trb(0, 0, 0, 1 << 5, TRB_STATUS_STAGE);
+    /// Perform a USB control transfer on EP0: a Setup stage, an optional Data stage (`length` > 0,
+    /// direction from `dir_in`), and a Status stage in the opposite direction (with IOC so a
+    /// Transfer Event is raised). `data_phys` is the physical address of the data buffer (ignored
+    /// when `length == 0`). Returns the completion code, or `None` on timeout.
+    fn control_transfer(
+        &mut self,
+        io: &mut dyn DeviceIo,
+        req_type: u8,
+        request: u8,
+        value: u16,
+        index: u16,
+        data_phys: u64,
+        length: u16,
+        dir_in: bool,
+    ) -> Option<u32> {
+        // TRT (Transfer Type) in setup dword3 [17:16]: 0 = no data, 2 = OUT data, 3 = IN data.
+        let trt: u32 = if length == 0 {
+            0
+        } else if dir_in {
+            3
+        } else {
+            2
+        };
+        let setup_d0 = req_type as u32 | ((request as u32) << 8) | ((value as u32) << 16);
+        let setup_d1 = index as u32 | ((length as u32) << 16);
+        // Setup Stage: 8-byte Setup packet is immediate data (IDT, bit 6); always 8-byte length.
+        self.ep0_enqueue_trb(setup_d0, setup_d1, 8, (1 << 6) | (trt << 16), TRB_SETUP_STAGE);
+        // Data Stage (optional): DIR (bit 16) = 1 for IN.
+        if length != 0 {
+            let dir = if dir_in { 1u32 << 16 } else { 0 };
+            self.ep0_enqueue_trb(data_phys as u32, (data_phys >> 32) as u32, length as u32, dir, TRB_DATA_STAGE);
+        }
+        // Status Stage: opposite direction of data (IN if there was no data stage), IOC (bit 5).
+        let status_dir = if length != 0 && dir_in { 0u32 } else { 1u32 << 16 };
+        self.ep0_enqueue_trb(0, 0, 0, status_dir | (1 << 5), TRB_STATUS_STAGE);
 
         self.ring_ep0_doorbell(io);
-        match self.wait_transfer_completion(io) {
+        self.wait_transfer_completion(io)
+    }
+
+    /// Read the 18-byte USB device descriptor (WP-04 step 3c-2) via a GET_DESCRIPTOR control
+    /// transfer. Returns vendor/product/class/bMaxPacketSize0 on success.
+    fn get_device_descriptor(&mut self, io: &mut dyn DeviceIo) -> Option<DeviceDescriptor> {
+        let (buf_phys, buf_virt) = alloc_dma_page()?;
+        // bmRequestType=0x80 (device→host, standard, device), bRequest=6 (GET_DESCRIPTOR),
+        // wValue=0x0100 (device descriptor, index 0), wIndex=0, wLength=18.
+        match self.control_transfer(io, 0x80, 6, 0x0100, 0, buf_phys, 18, true) {
             Some(1) => {
                 let rd = |off: u64| unsafe { core::ptr::read_volatile((buf_virt + off) as *const u8) };
                 let rd16 = |off: u64| (rd(off) as u16) | ((rd(off + 1) as u16) << 8);
@@ -303,6 +330,103 @@ impl Xhci {
             }
         }
     }
+
+    /// Read the configuration descriptor and parse out the first HID interface's boot interrupt-IN
+    /// endpoint (WP-04 step 4a). Returns the parsed `HidInterface` (config value, interface number,
+    /// protocol, endpoint address / max-packet / interval), or `None`.
+    fn get_hid_interface(&mut self, io: &mut dyn DeviceIo) -> Option<HidInterface> {
+        let (buf_phys, buf_virt) = alloc_dma_page()?;
+        // First fetch the 9-byte config descriptor header to learn wTotalLength.
+        match self.control_transfer(io, 0x80, 6, 0x0200, 0, buf_phys, 9, true) {
+            Some(1) => {}
+            other => {
+                crate::serial_println!("[XHCI] get-config(header) code {:?}", other);
+                return None;
+            }
+        }
+        let rd = |off: u64| unsafe { core::ptr::read_volatile((buf_virt + off) as *const u8) };
+        let total_len = (rd(2) as u16) | ((rd(3) as u16) << 8);
+        // Re-read the full configuration (bounded to one DMA page).
+        let want = total_len.min(4096);
+        match self.control_transfer(io, 0x80, 6, 0x0200, 0, buf_phys, want, true) {
+            Some(1) => {}
+            other => {
+                crate::serial_println!("[XHCI] get-config(full) code {:?}", other);
+                return None;
+            }
+        }
+        parse_hid_interface(buf_virt, want as u64)
+    }
+
+    /// Issue SET_CONFIGURATION (standard, no data stage). Returns true on success.
+    fn set_configuration(&mut self, io: &mut dyn DeviceIo, config: u8) -> bool {
+        // bmRequestType=0x00 (host→device, standard, device), bRequest=9 (SET_CONFIGURATION).
+        matches!(self.control_transfer(io, 0x00, 9, config as u16, 0, 0, 0, false), Some(1))
+    }
+
+    /// Issue the HID class request SET_PROTOCOL(boot=0) on `interface`. Returns true on success.
+    fn set_boot_protocol(&mut self, io: &mut dyn DeviceIo, interface: u16) -> bool {
+        // bmRequestType=0x21 (host→device, class, interface), bRequest=0x0B (SET_PROTOCOL),
+        // wValue=0 (boot protocol).
+        matches!(self.control_transfer(io, 0x21, 0x0B, 0, interface, 0, 0, false), Some(1))
+    }
+}
+
+/// A HID interface's boot interrupt-IN endpoint, parsed from the configuration descriptor.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HidInterface {
+    pub config_value: u8,
+    pub interface: u8,
+    /// bInterfaceProtocol: 1 = keyboard, 2 = mouse (HID boot subclass).
+    pub protocol: u8,
+    /// bEndpointAddress of the interrupt-IN endpoint (bit 7 set = IN; low nibble = endpoint number).
+    pub ep_address: u8,
+    pub ep_max_packet: u16,
+    pub ep_interval: u8,
+}
+
+/// Walk a configuration descriptor (`base` for `len` bytes), returning the first HID interface that
+/// has an interrupt-IN endpoint. Descriptors are a chain of `[bLength, bDescriptorType, ...]`.
+fn parse_hid_interface(base: u64, len: u64) -> Option<HidInterface> {
+    let rd = |off: u64| unsafe { core::ptr::read_volatile((base + off) as *const u8) };
+    let mut hid = HidInterface::default();
+    // Config descriptor: bConfigurationValue is at offset 5.
+    hid.config_value = rd(5);
+    let mut off = 0u64;
+    let mut in_hid_iface = false;
+    while off + 2 <= len {
+        let b_length = rd(off) as u64;
+        let b_type = rd(off + 1);
+        if b_length == 0 {
+            break; // malformed — avoid an infinite loop
+        }
+        match b_type {
+            0x04 => {
+                // Interface descriptor: class @5, subclass @6, protocol @7.
+                let iface_class = rd(off + 5);
+                in_hid_iface = iface_class == 0x03; // HID
+                if in_hid_iface {
+                    hid.interface = rd(off + 2);
+                    hid.protocol = rd(off + 7);
+                }
+            }
+            0x05 if in_hid_iface => {
+                // Endpoint descriptor: address @2, attributes @3, wMaxPacketSize @4, interval @6.
+                let addr = rd(off + 2);
+                let attr = rd(off + 3);
+                if addr & 0x80 != 0 && attr & 0x03 == 0x03 {
+                    // Interrupt (attr bits [1:0]=3) IN (bit 7) endpoint — the boot report endpoint.
+                    hid.ep_address = addr;
+                    hid.ep_max_packet = (rd(off + 4) as u16) | ((rd(off + 5) as u16) << 8);
+                    hid.ep_interval = rd(off + 6);
+                    return Some(hid);
+                }
+            }
+            _ => {}
+        }
+        off += b_length;
+    }
+    None
 }
 
 /// The (single) xHCI controller, populated on successful bring-up.
@@ -543,6 +667,27 @@ impl Driver for XhciDriver {
                                     "[XHCI] device descriptor: vendor={:#06x} product={:#06x} class={:#04x} bMaxPacketSize0={}",
                                     d.vendor, d.product, d.usb_class, d.max_packet0
                                 );
+                            }
+                            // Step 4a: parse the config for the HID boot endpoint, select the
+                            // configuration, and switch the interface to the boot protocol.
+                            if let Some(hid) = ctrl.get_hid_interface(io) {
+                                let kind = match hid.protocol {
+                                    1 => "keyboard",
+                                    2 => "mouse",
+                                    _ => "other",
+                                };
+                                crate::serial_println!(
+                                    "[XHCI] HID {}: iface={} ep={:#04x} maxpkt={} interval={} config={}",
+                                    kind, hid.interface, hid.ep_address, hid.ep_max_packet,
+                                    hid.ep_interval, hid.config_value
+                                );
+                                let cfg_ok = ctrl.set_configuration(io, hid.config_value);
+                                let proto_ok = ctrl.set_boot_protocol(io, hid.interface as u16);
+                                crate::serial_println!(
+                                    "[XHCI] set-config={} set-boot-protocol={}", cfg_ok, proto_ok
+                                );
+                            } else {
+                                crate::serial_println!("[XHCI] no HID interrupt-IN endpoint found");
                             }
                         }
                     }
