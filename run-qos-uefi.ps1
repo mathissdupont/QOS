@@ -27,7 +27,11 @@
 [CmdletBinding()]
 param(
     [switch]$Build,
-    [switch]$Serial
+    [switch]$Serial,
+    # Use the Windows Hypervisor Platform accelerator (much faster than software emulation). Opt-in
+    # because it needs the "Windows Hypervisor Platform" feature enabled; if QEMU rejects it the
+    # script automatically retries without acceleration.
+    [switch]$Fast
 )
 
 $ErrorActionPreference = 'Stop'
@@ -91,11 +95,17 @@ $qargs = @(
     '-device', 'usb-mouse'
 )
 
+if ($Fast) {
+    # Windows Hypervisor Platform: hardware-accelerated, far smoother than TCG emulation.
+    $qargs = @('-accel', 'whpx,kernel-irqchip=off') + $qargs
+    Write-Host '  Accelerator: WHPX (hardware). If QEMU errors, re-run without -Fast.' -ForegroundColor Cyan
+}
+
 Write-Host ''
 Write-Host 'QOS (UEFI) is booting in QEMU.' -ForegroundColor Green
-Write-Host "  Type 'gdesk' for the graphical desktop, 'help' for all commands."
+Write-Host "  After the Heptapus splash, pick Modern Desktop (Enter/D) or Terminal (S)."
 Write-Host '  MOUSE: click inside the QEMU window to CAPTURE the mouse' -ForegroundColor Yellow
-Write-Host '         (relative PS/2 mouse only moves once captured; Ctrl+Alt+G releases).' -ForegroundColor Yellow
+Write-Host '         (relative mouse only moves once captured; Ctrl+Alt+G releases).' -ForegroundColor Yellow
 Write-Host ''
 
 if ($Serial) {
@@ -106,7 +116,14 @@ if ($Serial) {
     $log = Join-Path $work 'qos-serial.log'
     Remove-Item $log -ErrorAction SilentlyContinue
     $qargs += @('-serial', "file:$log")
-    Start-Process -FilePath $qemu -ArgumentList $qargs
+    $p = Start-Process -FilePath $qemu -ArgumentList $qargs -PassThru
     Start-Sleep -Seconds 3
+    if ($Fast -and $p.HasExited -and $p.ExitCode -ne 0) {
+        # WHPX unavailable/rejected — retry without acceleration so the user still gets a window.
+        Write-Host 'WHPX unavailable; retrying without acceleration...' -ForegroundColor Yellow
+        $qargs = $qargs | Where-Object { $_ -ne 'whpx,kernel-irqchip=off' -and $_ -ne '-accel' }
+        Start-Process -FilePath $qemu -ArgumentList $qargs
+        Start-Sleep -Seconds 3
+    }
     Write-Host "Serial log: $log"
 }
