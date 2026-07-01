@@ -104,9 +104,11 @@ launch through the `kthread` engine (they currently use the original direct-`ire
 - **3.1 Live, multi-window desktop**: surface Phase-2 preemption in the GUI — a background task
   indicator (live counter) + clock in the taskbar; multiple windows/apps open at once; window
   focus/z-order. The "Windows-like" feel.
-- **3.2 Higher resolution (VESA)**: move from VGA Mode 13h (320×200×256) to a bootloader-0.11+
-  VESA linear framebuffer (640×480+ truecolor). See ADR-0013 Phase 2. (Bootloader upgrade —
-  scoped carefully; keep Mode 13h working as fallback.)
+- **3.2 Higher resolution (VESA)** ✅: kernel migrated to bootloader 0.11 (BIOS+UEFI); the desktop
+  now renders through a resolution-agnostic facade (`draw.rs`) onto the bootloader's linear
+  framebuffer, integer-scaled and centered from the 320×200 logical canvas to any resolution in
+  true color, with VGA Mode 13h kept as a 1:1 fallback. Palette/scale math is host-tested in the
+  `qos-gfx` crate; a **Display** app shows the live backend/resolution/scale. See ADR-0014.
 - **3.3 More apps**: a file manager (on the existing FS), a process/task monitor (shows the
   Phase-2 processes), a terminal window, alongside the Quantum Lab (circuit editor / job
   monitor — our quantum hook).

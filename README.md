@@ -35,18 +35,19 @@ simulator and plots the measurement histogram.
 
 ## Quick start (Windows + QEMU)
 
-Prerequisites: the pinned Rust toolchain (installed automatically from `rust-toolchain.toml`),
-[`cargo-bootimage`](https://github.com/rust-osdev/bootimage), and
-[QEMU](https://www.qemu.org/) (`qemu-system-x86_64`).
+Prerequisites: the pinned Rust toolchain (installed automatically from `rust-toolchain.toml`)
+and [QEMU](https://www.qemu.org/) (`qemu-system-x86_64`), which ships the OVMF/`edk2` UEFI
+firmware used to boot.
 
 ```powershell
-cargo install bootimage      # one-time
-./run-qos.ps1 -Build         # build the boot image and launch QEMU
+./run-qos-uefi.ps1 -Build    # build the UEFI image (cargo image) and launch QEMU + OVMF
 ```
 
-`run-qos.ps1` handles two Windows gotchas automatically: it finds QEMU even when it is not on
-`PATH`, and it copies the boot image to an ASCII-only temp path (non-ASCII repo paths corrupt
-QEMU's arguments). Add `-Serial` to mirror the guest serial log in your terminal.
+QOS boots via **UEFI** on a linear framebuffer (bootloader 0.11, ADR-0014); the desktop renders
+at the firmware's native resolution. `run-qos-uefi.ps1` handles the Windows gotchas: it finds
+QEMU and the bundled OVMF firmware even when not on `PATH`, uses a writable per-run copy of the
+UEFI variable store, and copies everything to an ASCII-only temp path (non-ASCII repo paths
+corrupt QEMU's arguments). Add `-Serial` to mirror the guest serial log in your terminal.
 
 At the shell prompt, type `gdesk` for the graphical desktop. **Click inside the QEMU window to
 capture the mouse** (a relative PS/2 mouse only moves once captured; `Ctrl+Alt+G` releases it).
@@ -57,7 +58,7 @@ From the shell (or run with `./run-qos.ps1 -Build -Serial` to watch the output):
 
 | Command | What it demonstrates |
 |---|---|
-| `gdesk` | Graphical desktop (Q = Quantum Lab, R = run, M = Task Monitor, A = About, F = Files, ESC = exit) |
+| `gdesk` | Graphical desktop (Q = Quantum Lab, R = run, M = Task Monitor, F = Files, D = Display, A = About, ESC = exit). Renders on the UEFI/VESA linear framebuffer (scaled from 320×200), falling back to VGA Mode 13h. |
 | `threadtest` | Preemptive context switching between two kernel threads |
 | `proctest` | Two isolated Ring-3 processes preempted concurrently |
 | `faulttest` | A crashing process is killed; the kernel and other processes survive |
@@ -87,9 +88,11 @@ reproducible Linux toolchain.
 
 ## Running on real hardware and VMs
 
-QOS boots via legacy BIOS and can run in VirtualBox/VMware or from a USB stick (with Legacy/CSM
-enabled). See [docs/HARDWARE.md](docs/HARDWARE.md) for the support matrix, disk-image formats
-(`dist/qos.vdi` / `.vmdk` / `.img`), and current limitations (UEFI is planned, not yet supported).
+QOS boots via **UEFI** (bootloader 0.11): write `dist/qos-uefi.img` to a USB stick and boot it
+on a UEFI machine, or attach it to a UEFI VM (QEMU+OVMF, and the major hypervisors in UEFI
+mode). It has been verified to boot to the desktop under QEMU+OVMF on both the `q35` and `pc`
+machine types. See [docs/HARDWARE.md](docs/HARDWARE.md) for the support matrix and disk-image
+formats. Real-hardware/USB validation is Stage 4 of ADR-0014 (in progress).
 
 ## Architecture
 

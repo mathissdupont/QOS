@@ -63,13 +63,11 @@ jobs:
       # and creates BIOS + UEFI disk images, copying them into dist/.
       - name: Build disk images
         run: cargo build -p qos-image --release
-      - name: Upload disk images
+      - name: Upload disk image
         uses: actions/upload-artifact@v4
         with:
-          name: qos-disk-images
-          path: |
-            dist/qos-bios.img
-            dist/qos-uefi.img
+          name: qos-uefi-image
+          path: dist/qos-uefi.img
           if-no-files-found: error
 
   smoke-uefi:

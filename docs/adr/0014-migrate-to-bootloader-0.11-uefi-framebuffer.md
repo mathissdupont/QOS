@@ -67,5 +67,15 @@ added in a later stage so UEFI boot and hi-res graphics can be de-risked indepen
 
 ## Status of execution
 
-Tracked in `docs/PLAN.md` (Phase 3.2 + Phase 4). Stage 1 is in progress on branch
-`feat/uefi-framebuffer`.
+Tracked in `docs/PLAN.md` (Phase 3.2 + Phase 4). On branch `feat/uefi-framebuffer`:
+
+- **Stage 1–2 (BIOS/UEFI boot):** done. The kernel runs on `bootloader_api` 0.11; the
+  `qos-image` builder produces `dist/qos-uefi.img`.
+- **Stage 3 (high-resolution framebuffer):** done. Text output routes to the linear framebuffer
+  (`framebuffer.rs`). The graphical desktop no longer targets VGA hardware directly: it renders
+  through a resolution-agnostic facade (`draw.rs`) that draws the fixed 320×200 logical canvas
+  onto the real framebuffer **integer-scaled and centered** (`qos-gfx::ScaleMap`), in true color
+  via the 16-entry palette, and falls back to VGA Mode 13h 1:1 when no framebuffer is present.
+  The pure palette/scale math lives in the host-tested `qos-gfx` crate. A **Display** desktop app
+  surfaces the active backend, physical resolution, and scale factor.
+- **Stage 4 (real-hardware validation):** not started.

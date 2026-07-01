@@ -1,0 +1,89 @@
+# WP-04: USB host controller + HID input
+
+- Status: 🟡 in progress
+- Epic: E-20 (USB core/xHCI), E-21 (USB HID)
+- ADRs: ADR-0015 (modern hardware), ADR-0016 (driver model)
+- Commits: (this WP, appended as delivered)
+
+## Goal
+
+Give QOS working **USB keyboard and mouse** — the single biggest unblocker for usability on real
+modern laptops, which have no PS/2. Built on the driver model (WP-02) and the APIC (WP-03).
+
+## Scope
+
+- In: xHCI host controller (the modern USB controller), USB device enumeration for HID, the HID
+  boot protocol for keyboard + mouse, feeding the existing unified input event queue.
+- Out (defer): USB hubs beyond the root, mass storage (separate WP), full (non-boot) HID report
+  descriptors, USB 1.x companion controllers (UHCI/EHCI) — xHCI presents all speeds.
+
+## Steps
+
+- [x] **Step 1 — Detect the xHCI controller.** Match PCI class 0x0C/0x03 via the driver model;
+  read the capability registers (CAPLENGTH, HCIVERSION, HCSPARAMS1 → max ports/slots) and log.
+- [x] **Step 2 — Controller bring-up.** Reset the controller; set up the Device Context Base
+  Address Array, the Command Ring, the Event Ring, and the run/stop + interrupter registers; run.
+- [~] **Step 3 — Port + device enumeration.** (3a) detect ports; (3b-1) reset to enable; (3b-2)
+  command/event ring via Enable Slot → slot id; (3c-1 done) Input/Slot/EP0 contexts + EP0 ring +
+  Device Context + **Address Device** → device addressed. (3c-2 todo) GET_DESCRIPTOR via a control
+  transfer on EP0. Context size read from HCCPARAMS1.CSZ (never assumed).
+- [ ] **Step 4 — HID boot protocol.** Set boot protocol; poll/interrupt the keyboard and mouse
+  endpoints; translate HID reports into unified `InputEvent`s.
+- [ ] **Step 5 — Interrupt-driven.** Route the xHCI interrupt (MSI, or its IO-APIC GSI) so input
+  is event-driven rather than polled. (Needs PCIe MSI, E-12, or the IO-APIC line.)
+
+## Acceptance criteria
+
+Ultimately: with `-device qemu-xhci -device usb-kbd -device usb-mouse` (and later real hardware),
+typing on the USB keyboard reaches the shell/desktop and the USB mouse moves the cursor, with the
+PS/2 path absent. Per-step: the boot log shows the controller detected and each bring-up stage
+succeeding.
+
+## Progress log
+
+- **Step 1 done.** xHCI controller detected via the driver model and its caps read: in
+  QEMU+OVMF (q35, `-device qemu-xhci -device usb-kbd -device usb-mouse`) →
+  `HCIVERSION=0x0100 CAPLENGTH=64 slots=64 ports=8` at MMIO `0xc000000000`; bound `1b36:000d` →
+  `xhci`. Found and fixed a real bug on the way (see below).
+
+## Continuation notes (technical — resume here)
+
+State: `xhci.rs` has a `Xhci` controller in `CONTROLLER: Mutex<Option<Xhci>>`, brought up and with
+one device **addressed** (fields `ep0_ring_phys/virt`, `ep0_enqueue`, `ep0_cycle`, `dev_slot`,
+`context_size`, `dcbaa_virt`, `doorbell_base`, `runtime_base`). Command ring + event ring helpers
+exist: `submit_command(d0,d1,d2,d3_extra,type,io)`, `poll_event → (type,cc,slot)`,
+`wait_command_completion`. MMIO via `io: &mut dyn DeviceIo` (mmio_read32/write32); DMA pages via
+`alloc_dma_page() -> (phys, virt)`; `read64_lo_hi_write(io, addr, val)` for 64-bit regs.
+
+**Step 3c-2 — GET_DESCRIPTOR (control transfer on EP0).** On the device's EP0 transfer ring
+(`ep0_ring_virt`, tracking `ep0_enqueue`/`ep0_cycle`) enqueue three TRBs:
+- **Setup Stage** (TRB type 2): the 8-byte USB Setup packet in dwords 0–1
+  (`bmRequestType=0x80, bRequest=6 GET_DESCRIPTOR, wValue=0x0100 device-descriptor, wIndex=0,
+  wLength=18`), dword2 = 8 (transfer length), dword3 = `(2<<10)|cycle | (3<<16 TRT=IN-data) | (1<<6 IDT)`.
+- **Data Stage** (TRB type 3): dword0/1 = physical addr of an 18-byte DMA buffer, dword2 = 18,
+  dword3 = `(3<<10)|cycle | (1<<16 DIR=IN)`.
+- **Status Stage** (TRB type 4): dword3 = `(4<<10)|cycle | (0<<16 DIR=OUT) | (1<<5 IOC)`.
+Then ring the **device doorbell**: `io.mmio_write32(doorbell_base + dev_slot*4, 1)` (DB target 1 =
+EP0). Poll the event ring for a **Transfer Event (type 32)**, cc==1. Read the 18 bytes: idVendor
+@8 (u16), idProduct @10, bDeviceClass @4, bMaxPacketSize0 @7. Log them. (Refine EP0 MaxPacketSize
+via an Evaluate Context if bMaxPacketSize0 differs — optional.)
+
+**Step 4 — HID boot protocol.** Parse config descriptor for the HID interrupt-IN endpoint; issue
+SET_CONFIGURATION and SET_PROTOCOL(boot); configure that endpoint (Configure Endpoint command +
+its own transfer ring); poll it for 8-byte boot keyboard reports (byte0 modifiers, bytes2-7
+keycodes) / 3-byte mouse reports; translate to `crate::input::InputEvent` and push to the queue.
+
+**Step 5 — interrupt-driven.** Enable the xHCI interrupter (IMAN) and route its IRQ (the PCI
+`interrupt_line` via the IO-APIC, or MSI once E-12 lands) instead of polling.
+
+## Notes & gaps
+
+- **Fixed: 64-bit PCI BARs.** `device::pci_resources` used BAR0 alone, so the xHCI's 64-bit BAR
+  (real base `0xc000000000`, high dword in BAR1) resolved to base 0. Now combines BAR1 for
+  64-bit memory BARs. (Also confirmed the bootloader's physical-memory offset mapping reaches
+  high MMIO above 4 GiB, so we can access the controller.)
+- **Gap:** BAR *size* probing isn't implemented (resource `len` is 0). Needed before we remap or
+  bounds-check MMIO precisely; fine for fixed-offset register access now.
+- xHCI is a large controller; this WP is intentionally multi-step. Each step is boot-verified.
+- Interrupt wiring (Step 5) may pull in PCIe MSI (E-12); until then the driver can poll the event
+  ring to prove function.

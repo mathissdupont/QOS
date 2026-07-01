@@ -7,7 +7,9 @@ description = "Builds bootable BIOS + UEFI disk images for the QOS kernel (bootl
 [dependencies]
 
 [build-dependencies]
-bootloader = "0.11"
+# UEFI-only: the BIOS stage builds fail in our toolchain and modern hardware is UEFI anyway.
+# (BIOS support can be re-enabled later by adding the "bios" feature.)
+bootloader = { version = "0.11", default-features = false, features = ["uefi"] }
 # Artifact dependency: cargo compiles the kernel ELF for the bare-metal target and exposes its
 # path via CARGO_BIN_FILE_OS_os (requires `[unstable] bindeps = true`).
 os = { path = "../qos-os-kernel", artifact = "bin", target = "x86_64-unknown-none" }

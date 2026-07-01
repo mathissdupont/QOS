@@ -41,6 +41,7 @@ lazy_static! {
 
         let mut gdt = GlobalDescriptorTable::new();
         let kernel_code_selector = gdt.append(Descriptor::kernel_code_segment());
+        let kernel_data_selector = gdt.append(Descriptor::kernel_data_segment());
         let user_code_selector = gdt.append(Descriptor::user_code_segment());
         let user_data_selector = gdt.append(Descriptor::user_data_segment());
         let tss_selector = gdt.append(Descriptor::tss_segment(unsafe { &*TSS.0.get() }));
@@ -48,6 +49,7 @@ lazy_static! {
             gdt,
             Selectors {
                 kernel_code: kernel_code_selector,
+                kernel_data: kernel_data_selector,
                 user_code: user_code_selector,
                 user_data: user_data_selector,
                 tss: tss_selector,
@@ -59,18 +61,26 @@ lazy_static! {
 #[derive(Clone, Copy)]
 pub struct Selectors {
     pub kernel_code: SegmentSelector,
+    pub kernel_data: SegmentSelector,
     pub user_code: SegmentSelector,
     pub user_data: SegmentSelector,
     pub tss: SegmentSelector,
 }
 
 pub fn init() {
-    use x86_64::instructions::segmentation::{CS, Segment};
+    use x86_64::instructions::segmentation::{Segment, CS, DS, ES, SS};
     use x86_64::instructions::tables::load_tss;
 
     GDT.0.load();
     unsafe {
         CS::set_reg(GDT.1.kernel_code);
+        // Reload the stack/data segment registers into the *new* GDT. The bootloader leaves SS
+        // holding a selector value (0x10 under UEFI) that indexes a different descriptor in our
+        // GDT (the user-code segment); without this, the first interrupt's `iretq` reloads that
+        // stale SS and #GPs (DPL/type mismatch). Loading a real kernel-data segment fixes it.
+        SS::set_reg(GDT.1.kernel_data);
+        DS::set_reg(GDT.1.kernel_data);
+        ES::set_reg(GDT.1.kernel_data);
         load_tss(GDT.1.tss);
     }
 }

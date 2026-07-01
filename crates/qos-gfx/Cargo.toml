@@ -1,0 +1,10 @@
+[package]
+name = "qos-gfx"
+version = "0.1.0"
+edition = "2021"
+description = "Portable, resolution-agnostic drawing primitives shared by the QOS graphics backends (VGA Mode 13h and the linear framebuffer). See ADR-0013/ADR-0014."
+license = "PolyForm-Noncommercial-1.0.0"
+
+[lib]
+# The crate is `no_std` when built for the kernel, but the default `cargo test`
+# harness needs `std`; `#![cfg_attr(not(test), no_std)]` gives us both.

@@ -32,6 +32,10 @@ mod user; // ✅ ENABLED: LLVM bug fixed with Docker Linux environment
 mod ui;
 mod vga;
 mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
+mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
+mod device;     // Device/driver model integration (qos-driver) — ADR-0016, epic E-01
+mod apic;       // ACPI/APIC discovery (qos-acpi) — ADR-0015, epic E-10
+mod xhci;       // xHCI USB host-controller driver — ADR-0015, epic E-20 (WP-04)
 
 mod allocator;
 mod ata;
@@ -67,7 +71,10 @@ use bootloader_api::config::Mapping;
 pub static BOOTLOADER_CONFIG: BootloaderConfig = {
     let mut config = BootloaderConfig::new_default();
     config.mappings.physical_memory = Some(Mapping::Dynamic);
-    config.kernel_stack_size = 256 * 1024; // 256 KiB
+    // 1 MiB: the kernel materializes large structs on the stack during init (e.g. the E1000
+    // driver's ~128 KiB rx/tx buffer struct). 256 KiB overflowed into the stack guard page and
+    // double-faulted on UEFI. See ADR-0014.
+    config.kernel_stack_size = 1024 * 1024; // 1 MiB
     config
 };
 
@@ -78,8 +85,24 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     serial::println!("QOS-OS boot OK (serial)");
 
-    // Initialize framebuffer (placeholder for bootloader 0.9.x)
-    framebuffer::init();
+    // Install the bootloader-provided linear framebuffer (UEFI/VESA). While active, all text
+    // output routes to it — the legacy 0xb8000 VGA text buffer is unmapped under UEFI.
+    if let Some(fb) = boot_info.framebuffer.as_mut() {
+        let info = fb.info();
+        let buf = fb.buffer_mut();
+        let (ptr, len) = (buf.as_mut_ptr(), buf.len());
+        framebuffer::init_from_bootloader(
+            ptr,
+            len,
+            info.width,
+            info.height,
+            info.stride * info.bytes_per_pixel,
+            info.bytes_per_pixel,
+        );
+    }
+
+    // The bootloader hands us the ACPI RSDP physical address (UEFI has no fixed BIOS location).
+    let rsdp_addr = boot_info.rsdp_addr.into_option();
 
     // Show boot splash screen (skip delay in verify mode)
     splash::show_splash();
@@ -113,6 +136,12 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     splash::show_progress("Detecting hardware...");
     rtc::init();          // Real-Time Clock
     pci::init();          // PCI bus enumeration
+    device::init();       // Device/driver model: match PCI devices to drivers (ADR-0016, additive)
+    if let Some(rsdp) = rsdp_addr {
+        apic::init(rsdp); // ACPI/APIC discovery: parse the MADT, log APIC topology (ADR-0015 E-10)
+    } else {
+        crate::serial_println!("[APIC] no RSDP from bootloader; APIC discovery skipped");
+    }
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
     // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
     syscall_ext::init();  // Extended syscalls

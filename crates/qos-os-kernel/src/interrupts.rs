@@ -14,6 +14,31 @@ static CTRL_DOWN: AtomicBool = AtomicBool::new(false);
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
+/// Local-APIC spurious interrupt vector (E-10). Any vector > 31; conventionally 0xFF.
+pub const SPURIOUS_VECTOR: u8 = 0xFF;
+/// Vector the local-APIC timer delivers on once we move the scheduler tick off the PIT (E-10).
+pub const APIC_TIMER_VECTOR: u8 = 0x40;
+
+/// True once the scheduler tick is delivered by the local-APIC timer (EOI goes to the APIC, not
+/// the PIC). Set by `apic::start_apic_timer_100hz`.
+pub static APIC_TIMER: AtomicBool = AtomicBool::new(false);
+
+/// True once external IRQs (keyboard/mouse) are delivered through the IO-APIC and the 8259 PIC is
+/// masked off. Their EOI then goes to the local APIC. Set by `apic::start_ioapic_routing`.
+pub static IOAPIC_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// End-of-interrupt for an external device IRQ: to the local APIC once the IO-APIC drives it,
+/// otherwise to the 8259 PIC. `pic_vector` is the device's PIC vector (used only in PIC mode).
+pub fn eoi_external(pic_vector: u8) {
+    if IOAPIC_ACTIVE.load(Ordering::SeqCst) {
+        crate::apic::eoi();
+    } else {
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(pic_vector);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
 pub enum InterruptIndex {
@@ -59,6 +84,18 @@ lazy_static! {
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
 
+        // Local-APIC timer (E-10): same preemptive ISR as the PIT timer, on its own vector. The
+        // scheduler tick moves here once `apic::start_apic_timer_100hz` runs; `timer_dispatch`
+        // then EOIs the local APIC instead of the PIC.
+        unsafe {
+            idt[APIC_TIMER_VECTOR]
+                .set_handler_addr(x86_64::VirtAddr::new(crate::asm_stubs::asm_timer_isr as usize as u64));
+        }
+
+        // Local-APIC spurious vector (E-10): fired by the APIC on rare conditions; needs a
+        // present IDT entry so it doesn't #GP, and requires NO end-of-interrupt.
+        idt[SPURIOUS_VECTOR].set_handler_fn(spurious_interrupt_handler);
+
         // Syscall entry point (Milestone 2): shared-memory ABI.
         idt[0x80]
             .set_handler_fn(syscall::syscall_interrupt_handler)
@@ -92,6 +129,10 @@ pub fn init_pics() {
 
     arch::enable_interrupts();
 }
+
+/// Local-APIC spurious interrupt (E-10). Per the SDM, no end-of-interrupt is sent for the
+/// spurious vector — just return.
+extern "x86-interrupt" fn spurious_interrupt_handler(_stack_frame: InterruptStackFrame) {}
 
 fn is_user_mode(stack_frame: &InterruptStackFrame) -> bool {
     stack_frame.code_segment.rpl() == PrivilegeLevel::Ring3
@@ -209,9 +250,14 @@ pub extern "C" fn timer_dispatch(saved_rsp: u64) -> u64 {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::syscall::on_timer_tick();
 
-    // Acknowledge the interrupt before any potential context switch.
-    unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    // Acknowledge the interrupt before any potential context switch. Once the tick is delivered
+    // by the local-APIC timer, EOI goes to the APIC; until then it goes to the 8259 PIC.
+    if APIC_TIMER.load(Ordering::SeqCst) {
+        crate::apic::eoi();
+    } else {
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
     }
 
     if crate::kthread::armed() {
@@ -255,10 +301,7 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
             if CTRL_DOWN.load(Ordering::Relaxed) {
                 // A foreground scheduled process can be interrupted even if we're currently
                 // running the shell (kernel mode).
-                unsafe {
-                    PICS.lock()
-                        .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-                }
+                eoi_external(InterruptIndex::Keyboard.as_u8());
 
                 let fg = crate::tasking::foreground_pid();
                 if fg != 0 {
@@ -281,17 +324,11 @@ extern "x86-interrupt" fn keyboard_interrupt_handler(stack_frame: InterruptStack
 
     keyboard::push_scancode(scancode);
 
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
-    }
+    eoi_external(InterruptIndex::Keyboard.as_u8());
 }
 
 extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFrame) {
     crate::mouse::handle_interrupt();
-    
-    unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Mouse.as_u8());
-    }
+
+    eoi_external(InterruptIndex::Mouse.as_u8());
 }

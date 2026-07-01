@@ -20,4 +20,19 @@ os-verify = "run -p qos-os-xtask -- verify"
 
 [target.x86_64-unknown-none]
 runner = "bootimage runner"
-rustflags = ["-Zunstable-options", "-Cpanic=abort"]
+# `relocation-model=static`: the kernel is a fixed-address higher-half image (linker.ld pins it
+# at 0xffffffff80000000), so it must NOT be position-independent. The default PIC model emits a
+# GOT that the linker folds into .data and covers with a GNU_RELRO segment; bootloader 0.11 then
+# maps that whole .data region read-only, so the first write to any mutable static in .data
+# (PICS, TSS, framebuffer FB_WRITER, …) triple-faults on UEFI. Static relocation removes the GOT
+# and the RELRO segment entirely, keeping .data writable. See ADR-0014.
+rustflags = [
+    "-Zunstable-options",
+    "-Cpanic=abort",
+    "-Crelocation-model=static",
+    # Even with static relocation, lld still emits a PT_GNU_RELRO segment over .data, which
+    # bootloader 0.11 maps read-only → the first write to any mutable static triple-faults on
+    # UEFI. Tell lld not to emit RELRO so .data stays writable. See ADR-0014.
+    "-Clink-arg=-z",
+    "-Clink-arg=norelro",
+]

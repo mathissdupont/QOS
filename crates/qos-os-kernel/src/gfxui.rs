@@ -7,9 +7,9 @@
 //! circuit on the in-kernel statevector simulator and plots the measurement histogram.
 //! ESC returns to the text shell.
 
+use crate::draw::{self, color};
 use crate::input::{self, InputEvent, MouseButton};
 use crate::quantum;
-use crate::vga13h::{self, color};
 
 const W: usize = 320;
 const H: usize = 200;
@@ -56,7 +56,7 @@ impl Cursor {
             for col in 0..CW {
                 let px = (self.x + col as i32).max(0) as usize;
                 let py = (self.y + row as i32).max(0) as usize;
-                self.saved[row * CW + col] = vga13h::get_pixel(px, py);
+                self.saved[row * CW + col] = draw::get_pixel(px, py);
             }
         }
     }
@@ -66,7 +66,7 @@ impl Cursor {
             for col in 0..CW {
                 let px = (self.x + col as i32).max(0) as usize;
                 let py = (self.y + row as i32).max(0) as usize;
-                vga13h::put_pixel(px, py, self.saved[row * CW + col]);
+                draw::put_pixel(px, py, self.saved[row * CW + col]);
             }
         }
     }
@@ -77,8 +77,8 @@ impl Cursor {
                 let px = (self.x + col as i32).max(0) as usize;
                 let py = (self.y + row as i32).max(0) as usize;
                 match CURSOR[row][col] {
-                    b'X' => vga13h::put_pixel(px, py, color::BLACK),
-                    b'O' => vga13h::put_pixel(px, py, color::WHITE),
+                    b'X' => draw::put_pixel(px, py, color::BLACK),
+                    b'O' => draw::put_pixel(px, py, color::WHITE),
                     _ => {}
                 }
             }
@@ -110,18 +110,18 @@ impl Button {
     fn draw(&self, pressed: bool) {
         use color::*;
         let (x, y, w, h) = (self.x as usize, self.y as usize, self.w as usize, self.h as usize);
-        vga13h::fill_rect(x, y, w, h, LTGRAY);
+        draw::fill_rect(x, y, w, h, LTGRAY);
         let (tl, br) = if pressed { (DKGRAY, WHITE) } else { (WHITE, DKGRAY) };
-        vga13h::fill_rect(x, y, w, 1, tl); // top
-        vga13h::fill_rect(x, y, 1, h, tl); // left
-        vga13h::fill_rect(x, y + h - 1, w, 1, br); // bottom
-        vga13h::fill_rect(x + w - 1, y, 1, h, br); // right
+        draw::fill_rect(x, y, w, 1, tl); // top
+        draw::fill_rect(x, y, 1, h, tl); // left
+        draw::fill_rect(x, y + h - 1, w, 1, br); // bottom
+        draw::fill_rect(x + w - 1, y, 1, h, br); // right
         // Centered label, nudged 1px when pressed for a tactile feel.
         let tw = self.label.len() as i32 * 8;
         let off = if pressed { 1 } else { 0 };
         let tx = (self.x + (self.w - tw) / 2 + off).max(self.x + 1) as usize;
         let ty = (self.y + (self.h - 8) / 2 + off) as usize;
-        vga13h::draw_string(tx, ty, self.label, BLACK, LTGRAY);
+        draw::draw_string(tx, ty, self.label, BLACK, LTGRAY);
     }
 }
 
@@ -157,13 +157,13 @@ impl Menu {
     fn draw(&self, hover: Option<usize>) {
         use color::*;
         let (x, y, w, h) = (self.x as usize, self.y as usize, self.w as usize, self.height() as usize);
-        vga13h::fill_rect(x, y, w, h, LTGRAY);
-        vga13h::rect(x, y, w, h, DKGRAY);
+        draw::fill_rect(x, y, w, h, LTGRAY);
+        draw::rect(x, y, w, h, DKGRAY);
         for (i, label) in self.items.iter().enumerate() {
             let iy = self.y + 1 + i as i32 * MENU_ITEM_H;
             let (bg, fg) = if hover == Some(i) { (BLUE, WHITE) } else { (LTGRAY, BLACK) };
-            vga13h::fill_rect(self.x as usize + 1, iy as usize, w - 2, MENU_ITEM_H as usize, bg);
-            vga13h::draw_string(self.x as usize + 5, iy as usize + 2, label, fg, bg);
+            draw::fill_rect(self.x as usize + 1, iy as usize, w - 2, MENU_ITEM_H as usize, bg);
+            draw::draw_string(self.x as usize + 5, iy as usize + 2, label, fg, bg);
         }
     }
 }
@@ -191,13 +191,13 @@ impl Window {
             return;
         }
         let (x, y, w, h) = (self.x as usize, self.y as usize, self.w as usize, self.h as usize);
-        vga13h::fill_rect(x, y, w, h, LTGRAY);
-        vga13h::rect(x, y, w, h, DKGRAY);
-        vga13h::fill_rect(x + 2, y + 2, w - 4, Self::TITLE_H as usize, BLUE);
-        vga13h::draw_string(x + 5, y + 4, self.title, WHITE, BLUE);
+        draw::fill_rect(x, y, w, h, LTGRAY);
+        draw::rect(x, y, w, h, DKGRAY);
+        draw::fill_rect(x + 2, y + 2, w - 4, Self::TITLE_H as usize, BLUE);
+        draw::draw_string(x + 5, y + 4, self.title, WHITE, BLUE);
         let cb = self.close_btn();
-        vga13h::fill_rect(cb.0 as usize, cb.1 as usize, 10, 10, RED);
-        vga13h::draw_string(cb.0 as usize + 1, cb.1 as usize + 1, "x", WHITE, RED);
+        draw::fill_rect(cb.0 as usize, cb.1 as usize, 10, 10, RED);
+        draw::draw_string(cb.0 as usize + 1, cb.1 as usize + 1, "x", WHITE, RED);
     }
 
     fn close_btn(&self) -> (i32, i32) {
@@ -277,31 +277,31 @@ impl QuantumApp {
         let wire1 = by + 30;
         let wstart = bx + 18;
         let wend = bx + 150;
-        vga13h::draw_string(bx, wire0 - 3, "q0", BLACK, LTGRAY);
-        vga13h::draw_string(bx, wire1 - 3, "q1", BLACK, LTGRAY);
-        vga13h::fill_rect(wstart, wire0, wend - wstart, 1, BLACK);
-        vga13h::fill_rect(wstart, wire1, wend - wstart, 1, BLACK);
+        draw::draw_string(bx, wire0 - 3, "q0", BLACK, LTGRAY);
+        draw::draw_string(bx, wire1 - 3, "q1", BLACK, LTGRAY);
+        draw::fill_rect(wstart, wire0, wend - wstart, 1, BLACK);
+        draw::fill_rect(wstart, wire1, wend - wstart, 1, BLACK);
 
         // H gate box on q0.
         let hx = wstart + 16;
-        vga13h::fill_rect(hx, wire0 - 5, 11, 11, WHITE);
-        vga13h::rect(hx, wire0 - 5, 11, 11, BLACK);
-        vga13h::draw_string(hx + 2, wire0 - 3, "H", BLACK, WHITE);
+        draw::fill_rect(hx, wire0 - 5, 11, 11, WHITE);
+        draw::rect(hx, wire0 - 5, 11, 11, BLACK);
+        draw::draw_string(hx + 2, wire0 - 3, "H", BLACK, WHITE);
 
         // CNOT: control dot on q0, target (+) on q1, connected vertically.
         let cx = wstart + 56;
-        vga13h::fill_rect(cx, wire0, 1, wire1 - wire0, BLACK); // vertical link
-        vga13h::fill_rect(cx - 2, wire0 - 2, 5, 5, BLACK); // control dot
-        vga13h::rect(cx - 4, wire1 - 4, 9, 9, BLACK); // target ring
-        vga13h::fill_rect(cx, wire1 - 4, 1, 9, BLACK); // target plus (v)
-        vga13h::fill_rect(cx - 4, wire1, 9, 1, BLACK); // target plus (h)
+        draw::fill_rect(cx, wire0, 1, wire1 - wire0, BLACK); // vertical link
+        draw::fill_rect(cx - 2, wire0 - 2, 5, 5, BLACK); // control dot
+        draw::rect(cx - 4, wire1 - 4, 9, 9, BLACK); // target ring
+        draw::fill_rect(cx, wire1 - 4, 1, 9, BLACK); // target plus (v)
+        draw::fill_rect(cx - 4, wire1, 9, 1, BLACK); // target plus (h)
 
         // Histogram of the last run (or a hint to press Run).
         let chart_y = by + 48;
         match self.result {
             None => {
-                vga13h::draw_string(bx, chart_y, "Press Run to measure", DKGRAY, LTGRAY);
-                vga13h::draw_string(bx, chart_y + 10, "the Bell state.", DKGRAY, LTGRAY);
+                draw::draw_string(bx, chart_y, "Press Run to measure", DKGRAY, LTGRAY);
+                draw::draw_string(bx, chart_y + 10, "the Bell state.", DKGRAY, LTGRAY);
             }
             Some((zeros, ones, shots)) => {
                 let max_bar = 48i32;
@@ -311,16 +311,16 @@ impl QuantumApp {
                 let b11 = (ones as i32 * max_bar / shots as i32).max(1);
                 let base = chart_y + max_bar as usize;
                 // |00> bar
-                vga13h::fill_rect(bx + 8, base - b00 as usize, 18, b00 as usize, GREEN);
-                vga13h::draw_string(bx + 6, base + 2, "00", BLACK, LTGRAY);
+                draw::fill_rect(bx + 8, base - b00 as usize, 18, b00 as usize, GREEN);
+                draw::draw_string(bx + 6, base + 2, "00", BLACK, LTGRAY);
                 draw_pct(bx + 4, chart_y - 2, p00);
                 // |11> bar
-                vga13h::fill_rect(bx + 48, base - b11 as usize, 18, b11 as usize, LTBLUE);
-                vga13h::draw_string(bx + 46, base + 2, "11", BLACK, LTGRAY);
+                draw::fill_rect(bx + 48, base - b11 as usize, 18, b11 as usize, LTBLUE);
+                draw::draw_string(bx + 46, base + 2, "11", BLACK, LTGRAY);
                 draw_pct(bx + 44, chart_y - 2, p11);
-                vga13h::draw_string(bx + 80, chart_y + 8, "Bell state:", BLACK, LTGRAY);
-                vga13h::draw_string(bx + 80, chart_y + 18, "|00>+|11>", BLACK, LTGRAY);
-                vga13h::draw_string(bx + 80, chart_y + 30, "01,10 ~ 0%", DKGRAY, LTGRAY);
+                draw::draw_string(bx + 80, chart_y + 8, "Bell state:", BLACK, LTGRAY);
+                draw::draw_string(bx + 80, chart_y + 18, "|00>+|11>", BLACK, LTGRAY);
+                draw::draw_string(bx + 80, chart_y + 30, "01,10 ~ 0%", DKGRAY, LTGRAY);
             }
         }
 
@@ -345,14 +345,15 @@ fn draw_pct(x: usize, y: usize, pct: i32) {
         &buf[..2]
     };
     let text = core::str::from_utf8(s).unwrap_or("?");
-    vga13h::draw_string(x, y, text, color::BLACK, color::LTGRAY);
+    draw::draw_string(x, y, text, color::BLACK, color::LTGRAY);
 }
 
 // ── Desktop composition ─────────────────────────────────────────────────────────────────
 
 const START_BTN: Button = Button { x: 2, y: (H as i32) - 12, w: 50, h: 10, label: "Start" };
 
-const MENU_ITEMS: [&str; 5] = ["Quantum Lab", "Files", "Task Monitor", "About", "Exit"];
+const MENU_ITEMS: [&str; 6] =
+    ["Quantum Lab", "Files", "Task Monitor", "Display", "About", "Exit"];
 
 fn start_menu() -> Menu {
     let items: &'static [&'static str] = &MENU_ITEMS;
@@ -368,14 +369,16 @@ enum AppKind {
     About,
     SysMon,
     Files,
+    Display,
 }
 
 /// Index i of `Scene::apps` corresponds to `APP_KINDS[i]`.
-const APP_KINDS: [AppKind; 4] = [AppKind::Welcome, AppKind::About, AppKind::SysMon, AppKind::Files];
+const APP_KINDS: [AppKind; 5] =
+    [AppKind::Welcome, AppKind::About, AppKind::SysMon, AppKind::Files, AppKind::Display];
 const SYSMON_IDX: usize = 2;
 
 struct Scene {
-    apps: [Window; 4],
+    apps: [Window; 5],
     qapp: QuantumApp,
     start_open: bool,
 }
@@ -398,45 +401,70 @@ fn draw_app_body(kind: AppKind, win: &Window) {
     let (bx, by) = (bx as usize, by as usize);
     match kind {
         AppKind::Welcome => {
-            vga13h::draw_string(bx, by, "Welcome to QOS.", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 12, "Click Start for apps,", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 24, "or Q = Quantum Lab.", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 40, "Drag title; [x] closes.", DKGRAY, LTGRAY);
+            draw::draw_string(bx, by, "Welcome to QOS.", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 12, "Click Start for apps,", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 24, "or Q = Quantum Lab.", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 40, "Drag title; [x] closes.", DKGRAY, LTGRAY);
         }
         AppKind::About => {
-            vga13h::draw_string(bx, by, "QOS - Quantum OS", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 14, "Preemptive ring3 kernel", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 26, "W^X + per-proc paging", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 38, "Quantum-ready control", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 54, "Heptapus Group", DKGRAY, LTGRAY);
+            draw::draw_string(bx, by, "QOS - Quantum OS", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 14, "Preemptive ring3 kernel", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 26, "W^X + per-proc paging", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 38, "Quantum-ready control", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 54, "Heptapus Group", DKGRAY, LTGRAY);
         }
         AppKind::SysMon => {
             let mut nb = [0u8; 20];
             let mut tb = [0u8; 20];
-            vga13h::draw_string(bx, by, "Scheduler: preemptive", BLACK, LTGRAY);
-            vga13h::draw_string(bx, by + 14, "Processes:", BLACK, LTGRAY);
-            vga13h::draw_string(bx + 8, by + 26, "- shell    (ring0)", DKGRAY, LTGRAY);
-            vga13h::draw_string(bx + 8, by + 38, "- bg-worker(ring0)", DKGRAY, LTGRAY);
-            vga13h::draw_string(bx, by + 56, "bg ticks:", BLACK, LTGRAY);
-            vga13h::draw_string(bx + 80, by + 56, fmt_u64(crate::kthread::bg_counter(), &mut nb), BLUE, LTGRAY);
-            vga13h::draw_string(bx, by + 68, "uptime:", BLACK, LTGRAY);
+            draw::draw_string(bx, by, "Scheduler: preemptive", BLACK, LTGRAY);
+            draw::draw_string(bx, by + 14, "Processes:", BLACK, LTGRAY);
+            draw::draw_string(bx + 8, by + 26, "- shell    (ring0)", DKGRAY, LTGRAY);
+            draw::draw_string(bx + 8, by + 38, "- bg-worker(ring0)", DKGRAY, LTGRAY);
+            draw::draw_string(bx, by + 56, "bg ticks:", BLACK, LTGRAY);
+            draw::draw_string(bx + 80, by + 56, fmt_u64(crate::kthread::bg_counter(), &mut nb), BLUE, LTGRAY);
+            draw::draw_string(bx, by + 68, "uptime:", BLACK, LTGRAY);
             let t = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-            vga13h::draw_string(bx + 80, by + 68, fmt_u64(t, &mut tb), BLUE, LTGRAY);
+            draw::draw_string(bx + 80, by + 68, fmt_u64(t, &mut tb), BLUE, LTGRAY);
+        }
+        AppKind::Display => {
+            // Proof of the ADR-0014 Stage 3 framebuffer path: shows which backend the desktop is
+            // rendering through and, when on the linear framebuffer, the physical resolution and
+            // the integer scale factor applied to the 320x200 logical canvas.
+            let (fb, pw, ph, scale) = draw::backend_info();
+            draw::draw_string(bx, by, "Display", BLACK, LTGRAY);
+            let mut wb = [0u8; 20];
+            let mut hb = [0u8; 20];
+            let mut sb = [0u8; 20];
+            if fb {
+                draw::draw_string(bx, by + 16, "Backend: framebuffer", BLUE, LTGRAY);
+                draw::draw_string(bx, by + 28, "Res:", BLACK, LTGRAY);
+                draw::draw_string(bx + 40, by + 28, fmt_u64(pw as u64, &mut wb), DKGRAY, LTGRAY);
+                draw::draw_string(bx + 88, by + 28, "x", BLACK, LTGRAY);
+                draw::draw_string(bx + 100, by + 28, fmt_u64(ph as u64, &mut hb), DKGRAY, LTGRAY);
+                draw::draw_string(bx, by + 40, "Scale:", BLACK, LTGRAY);
+                draw::draw_string(bx + 56, by + 40, fmt_u64(scale as u64, &mut sb), DKGRAY, LTGRAY);
+                draw::draw_string(bx + 72, by + 40, "x  (logical 320x200)", DKGRAY, LTGRAY);
+                draw::draw_string(bx, by + 56, "UEFI/VESA linear FB", BLACK, LTGRAY);
+            } else {
+                draw::draw_string(bx, by + 16, "Backend: VGA Mode 13h", BLUE, LTGRAY);
+                draw::draw_string(bx, by + 28, "Res: 320 x 200 (1x)", DKGRAY, LTGRAY);
+                draw::draw_string(bx, by + 44, "Legacy BIOS fallback", BLACK, LTGRAY);
+            }
         }
         AppKind::Files => {
-            vga13h::draw_string(bx, by, "File Manager   /", BLACK, LTGRAY);
+            draw::draw_string(bx, by, "File Manager   /", BLACK, LTGRAY);
             // Real directory listing from the in-kernel filesystem (Phase 3.4).
             let entries = crate::fs::get_entries(b"");
             if entries.is_empty() {
-                vga13h::draw_string(bx + 4, by + 16, "(empty)", DKGRAY, LTGRAY);
+                draw::draw_string(bx + 4, by + 16, "(empty)", DKGRAY, LTGRAY);
             } else {
                 let mut y = by + 16;
                 for (name, is_dir, _size) in entries.iter().take(6) {
                     let tag = if *is_dir { "[d]" } else { "[f]" };
                     let fg = if *is_dir { BLUE } else { DKGRAY };
-                    vga13h::draw_string(bx + 4, y, tag, fg, LTGRAY);
+                    draw::draw_string(bx + 4, y, tag, fg, LTGRAY);
                     let shown = if name.len() > 16 { &name[..16] } else { name.as_str() };
-                    vga13h::draw_string(bx + 32, y, shown, BLACK, LTGRAY);
+                    draw::draw_string(bx + 32, y, shown, BLACK, LTGRAY);
                     y += 12;
                 }
             }
@@ -466,12 +494,12 @@ fn draw_status() {
     use color::*;
     let ty = H - TASKBAR_H as usize;
     let x0 = 116usize;
-    vga13h::fill_rect(x0, ty + 1, W - x0, TASKBAR_H as usize - 2, LTGRAY);
+    draw::fill_rect(x0, ty + 1, W - x0, TASKBAR_H as usize - 2, LTGRAY);
 
     // Background-task counter — advances while you use the desktop (Phase 2 preemption, live).
     let mut nbuf = [0u8; 20];
-    vga13h::draw_string(x0, ty + 3, "bg:", BLACK, LTGRAY);
-    vga13h::draw_string(x0 + 24, ty + 3, fmt_u64(crate::kthread::bg_counter(), &mut nbuf), BLUE, LTGRAY);
+    draw::draw_string(x0, ty + 3, "bg:", BLACK, LTGRAY);
+    draw::draw_string(x0 + 24, ty + 3, fmt_u64(crate::kthread::bg_counter(), &mut nbuf), BLUE, LTGRAY);
 
     // Clock HH:MM:SS from the RTC.
     let dt = crate::rtc::read_datetime();
@@ -482,16 +510,16 @@ fn draw_status() {
         b'0' + (s / 10 % 10) as u8, b'0' + (s % 10) as u8,
     ];
     let clk = core::str::from_utf8(&clk).unwrap_or("--:--:--");
-    vga13h::draw_string(W - 8 * 8 - 2, ty + 3, clk, BLACK, LTGRAY);
+    draw::draw_string(W - 8 * 8 - 2, ty + 3, clk, BLACK, LTGRAY);
 }
 
 fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pressed: bool) {
     use color::*;
-    vga13h::clear(TEAL);
+    draw::clear(TEAL);
     // Top status bar.
-    vga13h::fill_rect(0, 0, W, TOPBAR_H as usize, BLUE);
-    vga13h::draw_string(2, 2, "QOS Desktop", WHITE, BLUE);
-    vga13h::draw_string(W - 17 * 8, 2, "ESC: exit to shell", WHITE, BLUE);
+    draw::fill_rect(0, 0, W, TOPBAR_H as usize, BLUE);
+    draw::draw_string(2, 2, "QOS Desktop", WHITE, BLUE);
+    draw::draw_string(W - 17 * 8, 2, "ESC: exit to shell", WHITE, BLUE);
 
     // Simple app windows (z-order = array order), then the Quantum Lab on top.
     for (i, win) in scene.apps.iter().enumerate() {
@@ -504,11 +532,11 @@ fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pres
 
     // Taskbar.
     let ty = H - TASKBAR_H as usize;
-    vga13h::fill_rect(0, ty, W, TASKBAR_H as usize, LTGRAY);
-    vga13h::fill_rect(0, ty, W, 1, WHITE);
+    draw::fill_rect(0, ty, W, TASKBAR_H as usize, LTGRAY);
+    draw::fill_rect(0, ty, W, 1, WHITE);
     START_BTN.draw(start_pressed || scene.start_open);
     if scene.qapp.win.open {
-        vga13h::draw_string(58, ty + 3, "QLab", BLACK, LTGRAY);
+        draw::draw_string(58, ty + 3, "QLab", BLACK, LTGRAY);
     }
     draw_status();
 
@@ -521,7 +549,7 @@ fn draw_scene(scene: &Scene, hover: Option<usize>, start_pressed: bool, run_pres
 /// Run the interactive desktop until ESC. Returns to text mode on exit.
 pub fn run() {
     crate::serial_println!("[GFXUI] entering interactive desktop");
-    vga13h::enter();
+    draw::enter();
 
     // Phase 3.1: a real preemptive background task runs behind the GUI (its counter ticks up
     // live in the taskbar) — Phase-2 multitasking made visible. Stopped on every exit path.
@@ -533,6 +561,7 @@ pub fn run() {
             Window { x: 76, y: 40, w: 176, h: 82, title: "About", open: false },
             Window { x: 40, y: 28, w: 184, h: 104, title: "Task Monitor", open: false },
             Window { x: 52, y: 52, w: 176, h: 104, title: "Files", open: false },
+            Window { x: 64, y: 44, w: 184, h: 92, title: "Display", open: false },
         ],
         qapp: QuantumApp::new(),
         start_open: false,
@@ -569,7 +598,7 @@ pub fn run() {
                 match ev {
                     InputEvent::Key { scancode: 0x01, pressed: true } => {
                         crate::kthread::stop_background_worker();
-                        vga13h::leave();
+                        draw::leave();
                         crate::serial_println!("[GFXUI] exited to text mode");
                         return;
                     }
@@ -604,6 +633,12 @@ pub fn run() {
                     }
                     InputEvent::Key { scancode: 0x21, pressed: true } => {
                         scene.open_kind(AppKind::Files);
+                        scene.start_open = false;
+                        dirty = true;
+                    }
+                    // D = Display (backend / resolution / scale)
+                    InputEvent::Key { scancode: 0x20, pressed: true } => {
+                        scene.open_kind(AppKind::Display);
                         scene.start_open = false;
                         dirty = true;
                     }
@@ -647,10 +682,11 @@ pub fn run() {
                                         }
                                         "Files" => scene.open_kind(AppKind::Files),
                                         "Task Monitor" => scene.open_kind(AppKind::SysMon),
+                                        "Display" => scene.open_kind(AppKind::Display),
                                         "About" => scene.open_kind(AppKind::About),
                                         "Exit" => {
                                             crate::kthread::stop_background_worker();
-                                            vga13h::leave();
+                                            draw::leave();
                                             crate::serial_println!("[GFXUI] exited via Start>Exit");
                                             return;
                                         }
