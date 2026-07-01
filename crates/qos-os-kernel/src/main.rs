@@ -169,7 +169,17 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     splash::show_progress("System ready!");
 
-    // Wait for user to dismiss splash (skip in verify mode)
+    // Branded animated boot splash on the framebuffer (WP-05 step 2); fall back to the text splash
+    // wait otherwise. Skipped in verify mode for determinism.
+    #[cfg(not(feature = "verify"))]
+    {
+        if framebuffer::active() {
+            compositor::run_splash();
+        } else {
+            splash::wait_for_continue();
+        }
+    }
+    #[cfg(feature = "verify")]
     splash::wait_for_continue();
 
     #[cfg(feature = "userdemo")]

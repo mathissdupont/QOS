@@ -10,6 +10,13 @@
 
 use qos_ui::{Rect, Surface, Theme};
 
+/// Heptapus boot-splash logo coverage mask (WP-05 step 2): the octopus + "HEPTAPUS GROUP" shape,
+/// generated from `heptapus_logo_primary_black.png`'s alpha by `scripts/gen_logo_mask.py`. One byte
+/// per pixel; tinted per theme at draw time.
+static LOGO_MASK: &[u8] = include_bytes!("assets/heptapus_logo_mask.bin");
+const LOGO_W: usize = 400;
+const LOGO_H: usize = 400;
+
 /// A filled circle via a maximally-rounded square (used for the macOS-style window dots + dock).
 fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
     s.rounded_rect(Rect::new(cx - d / 2, cy - d / 2, d, d), d / 2, color);
@@ -86,6 +93,84 @@ fn compose(s: &mut Surface, theme: &Theme) {
         s.rounded_rect(Rect::new(ix, iy, icon, icon), 12, *t);
         ix += icon + gap;
     }
+}
+
+/// Render one frame of the boot splash for animation parameter `e` in `0..=DURATION` ticks.
+fn splash_frame(s: &mut Surface, theme: &Theme, e: i32, duration: i32) {
+    let (w, h) = (s.width as i32, s.height as i32);
+    // Phases (in ticks): fade+scale in, hold, fade out.
+    let in_end = duration * 33 / 100;
+    let hold_end = duration * 73 / 100;
+    let alpha: i32 = if e < in_end {
+        e * 255 / in_end
+    } else if e < hold_end {
+        255
+    } else {
+        255 - (e - hold_end) * 255 / (duration - hold_end).max(1)
+    };
+    let alpha = alpha.clamp(0, 255) as u8;
+    // Scale from 82% to 100% during the fade-in (ease toward full), then steady.
+    let scale_pct = if e < in_end { 82 + 18 * e / in_end } else { 100 };
+
+    // Background: the dark theme wallpaper gradient.
+    s.gradient_v(Rect::new(0, 0, w, h), theme.wallpaper_top, theme.wallpaper_bottom);
+
+    // Centered logo, tinted near-white, growing + fading in.
+    let base = (h * 44 / 100).min(w * 44 / 100); // fit comfortably on screen
+    let size = base * scale_pct / 100;
+    let dst = Rect::new((w - size) / 2, (h - size) / 2 - h / 20, size, size);
+    s.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, dst, theme.text, alpha);
+
+    // A slim accent loading bar near the bottom that fills with progress.
+    let bar_w = w * 22 / 100;
+    let bar_h = 6;
+    let bx = (w - bar_w) / 2;
+    let by = h * 82 / 100;
+    s.rounded_rect(Rect::new(bx, by, bar_w, bar_h), 3, theme.surface_alt);
+    let fill = (bar_w * e / duration).clamp(0, bar_w);
+    if fill > 0 {
+        s.rounded_rect(Rect::new(bx, by, fill, bar_h), 3, theme.accent);
+    }
+}
+
+/// Play the branded animated boot splash (WP-05 step 2): the Heptapus logo fades in, grows, holds,
+/// then fades out over ~1.5 s, with a loading bar. Runs after init (heap/timer/framebuffer ready),
+/// before the shell. A keypress skips it. No-op without a linear framebuffer.
+pub fn run_splash() {
+    let info = match crate::framebuffer::info() {
+        Some(i) => i,
+        None => return,
+    };
+    let (w, h) = (info.width, info.height);
+    let theme = Theme::dark();
+    let mut surface = Surface::new(w, h);
+    crate::serial_println!("[UI] boot splash: {}x{} Heptapus animation", w, h);
+
+    const DURATION: i32 = 150; // ~1.5 s at the 100 Hz APIC tick
+    // Drain any input queued during boot so a stale event doesn't instantly "skip" the splash;
+    // only a key pressed *during* the splash should skip it.
+    while crate::input::poll().is_some() {}
+    let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
+    let mut last_e = -1;
+    loop {
+        let now = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
+        let e = (now - start) as i32;
+        if e >= DURATION {
+            break;
+        }
+        // Skip on a key pressed during the splash.
+        if let Some(crate::input::InputEvent::Key { pressed: true, .. }) = crate::input::poll() {
+            break;
+        }
+        if e != last_e {
+            splash_frame(&mut surface, &theme, e, DURATION);
+            crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            last_e = e;
+        }
+        crate::arch::hlt();
+    }
+    crate::framebuffer::clear(0x000000);
+    crate::framebuffer::reset_cursor();
 }
 
 /// Run the modern-desktop demo (opt-in via the `modern` shell command). Composes the scene, blits

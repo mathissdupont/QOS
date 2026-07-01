@@ -245,6 +245,32 @@ impl Surface {
         }
     }
 
+    /// Tint and blend an 8-bit coverage mask into an arbitrary destination rectangle, scaling it
+    /// (nearest-neighbor) to fit, with an extra `global_alpha` multiplier (0..=255) over the whole
+    /// mask. Used for the animated boot splash (fade via `global_alpha`, grow via `dst` size) and,
+    /// later, scaled glyph blits. Clipped.
+    pub fn blit_mask_scaled(&mut self, mask: &[u8], mw: usize, mh: usize, dst: Rect, color: Rgb, global_alpha: u8) {
+        if dst.w <= 0 || dst.h <= 0 || mw == 0 || mh == 0 || global_alpha == 0 {
+            return;
+        }
+        let (dw, dh) = (dst.w as usize, dst.h as usize);
+        if let Some((x0, y0, x1, y1)) = self.clip(&dst) {
+            for y in y0..y1 {
+                let sy = (((y as i32 - dst.y) as usize) * mh / dh).min(mh - 1);
+                let mrow = sy * mw;
+                let drow = y * self.width;
+                for x in x0..x1 {
+                    let sx = (((x as i32 - dst.x) as usize) * mw / dw).min(mw - 1);
+                    let cov = mask[mrow + sx];
+                    if cov > 0 {
+                        let a = ((cov as u32 * global_alpha as u32 + 127) / 255) as u8;
+                        self.pixels[drow + x] = color::blend(self.pixels[drow + x], color, a);
+                    }
+                }
+            }
+        }
+    }
+
     /// Tint and blend an 8-bit coverage/alpha mask (`mask[y*mw + x]`, 0..=255) with `color` at
     /// `(dx, dy)` — used for glyphs and the logo splash mask (clipped).
     pub fn blit_mask(&mut self, mask: &[u8], mw: usize, mh: usize, dx: i32, dy: i32, color: Rgb) {
@@ -322,6 +348,17 @@ mod tests {
         assert_eq!(s.get(0, 0), rgb(0, 0, 0)); // alpha 0
         assert_eq!(s.get(1, 0), rgb(128, 128, 128)); // alpha 128
         assert_eq!(s.get(2, 0), rgb(255, 255, 255)); // alpha 255
+    }
+
+    #[test]
+    fn blit_mask_scaled_upscales_and_fades() {
+        // 2x2 mask, fully opaque, scaled into a 4x4 dst with 50% global alpha over black.
+        let mut s = Surface::filled(4, 4, rgb(0, 0, 0));
+        let mask = [255u8; 4];
+        s.blit_mask_scaled(&mask, 2, 2, Rect::new(0, 0, 4, 4), rgb(255, 255, 255), 128);
+        // Every pixel is covered (mask all 255) at ~50% → mid grey.
+        assert_eq!(s.get(0, 0), rgb(128, 128, 128));
+        assert_eq!(s.get(3, 3), rgb(128, 128, 128));
     }
 
     #[test]

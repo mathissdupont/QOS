@@ -35,8 +35,14 @@ host-tested.
   gradient wallpaper, translucent top bar + dock, two overlapping rounded windows with soft drop
   shadows and macOS traffic-light dots, colorful dock tiles — at native **1280×800 true-color**;
   `t` toggles light/dark live. 0 faults.
-- [ ] **Step 2 — Branded boot splash.** Build-time logo→alpha-mask asset embedded in the kernel;
-  animated fade-in + scale on a themed background before the desktop. Screenshot-verify.
+- [x] **Step 2 — Branded boot splash.** `scripts/gen_logo_mask.py` decodes
+  `heptapus_logo_primary_black.png` (pure-stdlib PNG decode) → a 400×400 alpha coverage mask
+  (`assets/heptapus_logo_mask.bin`) embedded via `include_bytes!`. `compositor::run_splash` plays a
+  ~1.5 s animation on the dark gradient: logo fades in + scales up, holds, fades out, with an accent
+  loading bar. Runs after init (heap/timer/framebuffer ready) in place of the text
+  `wait_for_continue`. Verified in QEMU (screenshot): crisp white octopus + "HEPTAPUS GROUP" on the
+  themed background, 0 faults, boot reaches ready. Fix: drain stale boot input first so a queued key
+  doesn't instantly skip the splash. New primitive: `Surface::blit_mask_scaled`.
 - [ ] **Step 3 — TrueType fonts (E-71).** Embed a permissively-licensed TTF; parse
   head/cmap/loca/glyf/hmtx; rasterize outlines with coverage AA; glyph cache; text layout. Host
   tests for parsing + a known glyph's coverage. Verify crisp text on screen.
@@ -65,3 +71,13 @@ toggle, and working built-in apps driven by USB keyboard + mouse.
   replaces it; do not regress the current boot.
 - Font license must be redistributable (OFL/Apache/etc.); record the exact face here when embedded.
 - The Heptapus logo is first-party (Heptapus Group).
+- **Bug (pre-existing, framebuffer text console):** `framebuffer::draw_char`/the VGA-text→framebuffer
+  path renders text **horizontally mirrored** (visible in the shell/desktop text). The compositor
+  (`blit_region`) is unaffected — the modern desktop + splash render correctly. Fix when the new UI
+  replaces the text console, or sooner if it bothers the shell.
+- **Cross-cutting concerns to carry through every UI slice** (per the user): **settings** (a real
+  settings/preferences surface: theme, display, input, about), **security** (per-app boundaries,
+  input isolation, no unchecked memory from untrusted data, least-privilege as user mode matures),
+  **performance & efficiency** (dirty-rect blits instead of full-frame — `DirtyTracker` exists and
+  should drive `blit_region` in the desktop/WM; glyph cache; avoid per-pixel locks; only redraw on
+  change). Track these as acceptance checks in steps 4–5, not afterthoughts.
