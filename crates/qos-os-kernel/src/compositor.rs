@@ -8,6 +8,9 @@
 //! Opt-in for now via the `modern` shell command (fallback-first, ADR-0015): it does not replace
 //! the legacy desktop until the toolkit is ready.
 
+use alloc::vec;
+use alloc::vec::Vec;
+
 use qos_ui::font::{Font, FontRenderer};
 use qos_ui::{Rect, Surface, Theme};
 
@@ -18,94 +21,307 @@ static LOGO_MASK: &[u8] = include_bytes!("assets/heptapus_logo_mask.bin");
 const LOGO_W: usize = 400;
 const LOGO_H: usize = 400;
 
+// Layout constants shared by drawing + hit-testing (WP-05 step 4).
+const BAR_H: i32 = 30;
+const HEADER_H: i32 = 42;
+const DOCK_ICON: i32 = 48;
+const DOCK_GAP: i32 = 16;
+
+/// The built-in apps a dock icon / window represents.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AppKind {
+    Terminal,
+    Files,
+    Quantum,
+    Settings,
+}
+
+const APPS: [AppKind; 4] = [AppKind::Terminal, AppKind::Files, AppKind::Quantum, AppKind::Settings];
+
+fn app_title(k: AppKind) -> &'static str {
+    match k {
+        AppKind::Terminal => "Terminal",
+        AppKind::Files => "Files",
+        AppKind::Quantum => "Quantum Lab",
+        AppKind::Settings => "Settings",
+    }
+}
+
+fn app_tint(k: AppKind, theme: &Theme) -> qos_ui::Rgb {
+    match k {
+        AppKind::Terminal => theme.accent,
+        AppKind::Files => qos_ui::rgb(0x30, 0xb0, 0x60),
+        AppKind::Quantum => qos_ui::rgb(0x8a, 0x5c, 0xd8),
+        AppKind::Settings => qos_ui::rgb(0xe0, 0x7a, 0x2a),
+    }
+}
+
 /// A filled circle via a maximally-rounded square (used for the macOS-style window dots + dock).
 fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
     s.rounded_rect(Rect::new(cx - d / 2, cy - d / 2, d, d), d / 2, color);
 }
 
-/// Draw one macOS/GNOME-hybrid window: soft drop shadow, rounded body, a header strip with the
-/// three traffic-light dots, a centered title, and an accent button with a label.
-fn draw_window(s: &mut Surface, fr: &mut FontRenderer, theme: &Theme, r: Rect, title: &str, button: &str) {
-    let radius = 14;
-    // Soft drop shadow, offset slightly down for depth.
-    s.drop_shadow(Rect::new(r.x, r.y + 6, r.w, r.h), radius, 22, theme.shadow, if theme.is_dark { 150 } else { 90 });
-    // Window body.
-    s.rounded_rect(r, radius, theme.surface);
-    // Header strip (same rounded top; the body underneath keeps the bottom square).
-    let header_h = 42;
-    s.rounded_rect(Rect::new(r.x, r.y, r.w, header_h), radius, theme.surface_alt);
-    s.fill_rect(Rect::new(r.x, r.y + radius, r.w, header_h - radius), theme.surface_alt);
-    // Hairline under the header.
-    s.fill_rect(Rect::new(r.x, r.y + header_h, r.w, 1), theme.border);
-    // Traffic-light dots.
-    let cy = r.y + header_h / 2;
-    circle(s, r.x + 22, cy, 14, qos_ui::rgb(0xff, 0x5f, 0x57)); // close (red)
-    circle(s, r.x + 44, cy, 14, qos_ui::rgb(0xfe, 0xbc, 0x2e)); // minimize (yellow)
-    circle(s, r.x + 66, cy, 14, qos_ui::rgb(0x28, 0xc8, 0x40)); // maximize (green)
-    // Centered window title.
-    let tsize = 18.0;
-    let tw = fr.text_width(title, tsize);
-    fr.draw_text(s, r.x + (r.w - tw) / 2, cy + 6, title, tsize, theme.text);
-    // A primary accent button with a centered label.
-    let btn = Rect::new(r.x + 24, r.y + header_h + 28, 150, 40);
-    s.rounded_rect(btn, 10, theme.accent);
-    let bw = fr.text_width(button, 16.0);
-    fr.draw_text(s, btn.x + (btn.w - bw) / 2, btn.y + 26, button, 16.0, theme.on_accent);
-    // A couple of "content" rows to suggest a list.
-    for i in 0..3 {
-        let row = Rect::new(r.x + 24, r.y + header_h + 92 + i * 30, r.w - 48, 18);
-        s.rounded_rect(row, 6, theme.surface_alt);
-    }
+/// An open window on the desktop.
+struct Win {
+    rect: Rect,
+    kind: AppKind,
 }
 
-/// Compose the full modern desktop scene into `s` for the given `theme`.
-fn compose(s: &mut Surface, fr: &mut FontRenderer, theme: &Theme) {
-    let (w, h) = (s.width as i32, s.height as i32);
+/// 11×16 arrow-cursor bitmap: `#` = dark outline, `o` = white fill, `.` = transparent.
+const CURSOR: [&str; 16] = [
+    "#..........",
+    "##.........",
+    "#o#........",
+    "#oo#.......",
+    "#ooo#......",
+    "#oooo#.....",
+    "#ooooo#....",
+    "#oooooo#...",
+    "#ooooooo#..",
+    "#oooooooo#.",
+    "#oooo#####.",
+    "#oo#oo#....",
+    "#o#.#oo#...",
+    "##..#oo#...",
+    "#....#oo#..",
+    ".....#oo#..",
+];
 
-    // Wallpaper: vertical gradient across the whole screen.
-    s.gradient_v(Rect::new(0, 0, w, h), theme.wallpaper_top, theme.wallpaper_bottom);
+/// The interactive modern desktop: window manager state + rendering + input handling (WP-05 step 4).
+struct Desktop {
+    w: i32,
+    h: i32,
+    theme: Theme,
+    wins: Vec<Win>,                  // z-order: last element is topmost/focused
+    cursor: (i32, i32),
+    drag: Option<(usize, i32, i32)>, // (window index, grab offset x, grab offset y)
+    dirty: bool,
+}
 
-    // Top menu bar: translucent strip.
-    let bar_h = 30;
-    s.blend_rect(Rect::new(0, 0, w, bar_h), theme.bar, 210);
-    // Logo spot + name on the left, menu items, and a clock on the right — real antialiased text.
-    s.rounded_rect(Rect::new(12, 7, 16, 16), 5, theme.accent);
-    fr.draw_text(s, 36, 21, "QOS", 16.0, theme.text);
-    let mut mx = 84;
-    for item in ["File", "Edit", "View", "Window", "Help"] {
-        mx = fr.draw_text(s, mx, 21, item, 15.0, theme.text_dim) + 20;
+impl Desktop {
+    fn new(w: i32, h: i32) -> Self {
+        // Start with two cascaded windows so the desktop looks alive.
+        let wins = vec![
+            Win { rect: Rect::new(w / 2 - 430, 96, 520, 360), kind: AppKind::Terminal },
+            Win { rect: Rect::new(w / 2 - 20, 250, 500, 320), kind: AppKind::Files },
+        ];
+        Desktop { w, h, theme: Theme::dark(), wins, cursor: (w / 2, h / 2), drag: None, dirty: true }
     }
-    let clock = "12:42";
-    let cw = fr.text_width(clock, 15.0);
-    fr.draw_text(s, w - cw - 16, 21, clock, 15.0, theme.text);
 
-    // Two overlapping windows (shows z-order + shadows + titles).
-    draw_window(s, fr, theme, Rect::new(w / 2 - 440, 90, 520, 360), "Terminal", "New");
-    draw_window(s, fr, theme, Rect::new(w / 2 - 40, 240, 500, 330), "Files", "Open");
+    // ---- geometry / hit-testing ----
+    fn dock_rect(&self) -> Rect {
+        let n = APPS.len() as i32;
+        let dw = n * DOCK_ICON + (n + 1) * DOCK_GAP;
+        let dh = DOCK_ICON + 2 * DOCK_GAP;
+        Rect::new(self.w / 2 - dw / 2, self.h - dh - 14, dw, dh)
+    }
+    fn dock_icon_rect(&self, i: i32) -> Rect {
+        let d = self.dock_rect();
+        Rect::new(d.x + DOCK_GAP + i * (DOCK_ICON + DOCK_GAP), d.y + DOCK_GAP, DOCK_ICON, DOCK_ICON)
+    }
+    /// The light/dark toggle pill in the top-right of the menu bar.
+    fn theme_btn(&self) -> Rect {
+        Rect::new(self.w - 150, 4, 64, 22)
+    }
+    fn close_dot(&self, r: &Rect) -> (i32, i32) {
+        (r.x + 22, r.y + HEADER_H / 2)
+    }
 
-    // Dock: centered translucent rounded panel with icon tiles.
-    let dock_w = 460;
-    let dock_h = 66;
-    let dock = Rect::new(w / 2 - dock_w / 2, h - dock_h - 14, dock_w, dock_h);
-    s.drop_shadow(dock, 20, 18, theme.shadow, if theme.is_dark { 140 } else { 70 });
-    s.rounded_rect_blend(dock, 20, theme.dock, 235);
-    let icon = 46;
-    let gap = 16;
-    let count = 6;
-    let total = count * icon + (count - 1) * gap;
-    let mut ix = dock.x + (dock_w - total) / 2;
-    let iy = dock.y + (dock_h - icon) / 2;
-    let tints = [
-        theme.accent,
-        qos_ui::rgb(0x30, 0xb0, 0x60),
-        qos_ui::rgb(0xe0, 0x7a, 0x2a),
-        qos_ui::rgb(0x8a, 0x5c, 0xd8),
-        qos_ui::rgb(0x27, 0xa8, 0xc8),
-        theme.surface_alt,
-    ];
-    for t in tints.iter() {
-        s.rounded_rect(Rect::new(ix, iy, icon, icon), 12, *t);
-        ix += icon + gap;
+    // ---- app/window management ----
+    fn open_app(&mut self, kind: AppKind) {
+        if let Some(i) = self.wins.iter().position(|w| w.kind == kind) {
+            let win = self.wins.remove(i);
+            self.wins.push(win); // raise
+        } else {
+            let n = self.wins.len() as i32;
+            let rect = Rect::new((self.w / 2 - 260 + n * 28).max(20), (110 + n * 28).min(self.h - 360), 500, 320);
+            self.wins.push(Win { rect, kind });
+        }
+        self.dirty = true;
+    }
+
+    // ---- input ----
+    fn on_mouse_move(&mut self, dx: i16, dy: i16) {
+        self.cursor.0 = (self.cursor.0 + dx as i32).clamp(0, self.w - 1);
+        // InputEvent dy is +up (PS/2 convention); screen y grows downward.
+        self.cursor.1 = (self.cursor.1 - dy as i32).clamp(0, self.h - 1);
+        if let Some((idx, ox, oy)) = self.drag {
+            if idx < self.wins.len() {
+                let nx = self.cursor.0 - ox;
+                let ny = (self.cursor.1 - oy).max(BAR_H);
+                self.wins[idx].rect.x = nx;
+                self.wins[idx].rect.y = ny;
+            }
+        }
+        self.dirty = true;
+    }
+
+    fn on_left_down(&mut self) {
+        let (cx, cy) = self.cursor;
+        // Top menu bar: theme toggle.
+        if self.theme_btn().contains(cx, cy) {
+            self.theme = self.theme.toggled();
+            self.dirty = true;
+            return;
+        }
+        // Windows, top-most first.
+        for i in (0..self.wins.len()).rev() {
+            let r = self.wins[i].rect;
+            let (dxc, dyc) = self.close_dot(&r);
+            if (cx - dxc).abs() <= 9 && (cy - dyc).abs() <= 9 {
+                self.wins.remove(i); // close
+                self.dirty = true;
+                return;
+            }
+            if r.contains(cx, cy) {
+                // Raise; if on the header, begin dragging.
+                let win = self.wins.remove(i);
+                let on_header = cy < win.rect.y + HEADER_H;
+                let off = (cx - win.rect.x, cy - win.rect.y);
+                self.wins.push(win);
+                if on_header {
+                    self.drag = Some((self.wins.len() - 1, off.0, off.1));
+                }
+                self.dirty = true;
+                return;
+            }
+        }
+        // Dock icons.
+        for (i, &kind) in APPS.iter().enumerate() {
+            if self.dock_icon_rect(i as i32).contains(cx, cy) {
+                self.open_app(kind);
+                return;
+            }
+        }
+    }
+
+    fn on_left_up(&mut self) {
+        if self.drag.take().is_some() {
+            self.dirty = true;
+        }
+    }
+
+    // ---- rendering ----
+    fn draw_window(&self, s: &mut Surface, fr: &mut FontRenderer, i: usize, focused: bool) {
+        let theme = &self.theme;
+        let r = self.wins[i].rect;
+        let kind = self.wins[i].kind;
+        let radius = 14;
+        let shadow_a = if focused { if theme.is_dark { 160 } else { 100 } } else { if theme.is_dark { 90 } else { 50 } };
+        s.drop_shadow(Rect::new(r.x, r.y + 6, r.w, r.h), radius, 22, theme.shadow, shadow_a);
+        s.rounded_rect(r, radius, theme.surface);
+        // Header.
+        s.rounded_rect(Rect::new(r.x, r.y, r.w, HEADER_H), radius, theme.surface_alt);
+        s.fill_rect(Rect::new(r.x, r.y + radius, r.w, HEADER_H - radius), theme.surface_alt);
+        s.fill_rect(Rect::new(r.x, r.y + HEADER_H, r.w, 1), theme.border);
+        // Focus accent line along the top of a focused window.
+        if focused {
+            s.fill_rect(Rect::new(r.x + radius, r.y, r.w - 2 * radius, 2), theme.accent);
+        }
+        let cy = r.y + HEADER_H / 2;
+        circle(s, r.x + 22, cy, 14, qos_ui::rgb(0xff, 0x5f, 0x57));
+        circle(s, r.x + 44, cy, 14, qos_ui::rgb(0xfe, 0xbc, 0x2e));
+        circle(s, r.x + 66, cy, 14, qos_ui::rgb(0x28, 0xc8, 0x40));
+        let title = app_title(kind);
+        let tw = fr.text_width(title, 18.0);
+        fr.draw_text(s, r.x + (r.w - tw) / 2, cy + 6, title, 18.0, theme.text);
+        // Body content (light stubs; full apps are step 5).
+        let bx = r.x + 22;
+        let by = r.y + HEADER_H + 30;
+        match kind {
+            AppKind::Terminal => {
+                s.rounded_rect(Rect::new(r.x + 12, r.y + HEADER_H + 10, r.w - 24, r.h - HEADER_H - 22), 8, qos_ui::rgb(0x10, 0x12, 0x18));
+                fr.draw_text(s, bx, by + 8, "qos:\\> run bell.qasm", 15.0, qos_ui::rgb(0x6e, 0xe0, 0x7a));
+                fr.draw_text(s, bx, by + 34, "measuring 2 qubits...", 15.0, theme.text_dim);
+                fr.draw_text(s, bx, by + 60, "00 -> 512   11 -> 512", 15.0, theme.text);
+                fr.draw_text(s, bx, by + 90, "qos:\\> _", 15.0, qos_ui::rgb(0x6e, 0xe0, 0x7a));
+            }
+            AppKind::Files => {
+                for (j, name) in ["Documents", "quantum", "readme.txt", "bell.qasm"].iter().enumerate() {
+                    let ry = by + j as i32 * 34;
+                    s.rounded_rect(Rect::new(bx, ry, r.w - 44, 26), 6, theme.surface_alt);
+                    fr.draw_text(s, bx + 12, ry + 19, name, 15.0, theme.text);
+                }
+            }
+            AppKind::Quantum => {
+                fr.draw_text(s, bx, by + 8, "Circuit: Bell state", 16.0, theme.text);
+                for (j, line) in ["q0 : |0> --[H]--*--", "q1 : |0> -------X--"].iter().enumerate() {
+                    fr.draw_text(s, bx, by + 44 + j as i32 * 28, line, 15.0, theme.text_dim);
+                }
+                let btn = Rect::new(bx, by + 120, 130, 38);
+                s.rounded_rect(btn, 9, theme.accent);
+                let bw = fr.text_width("Run", 16.0);
+                fr.draw_text(s, btn.x + (btn.w - bw) / 2, btn.y + 25, "Run", 16.0, theme.on_accent);
+            }
+            AppKind::Settings => {
+                fr.draw_text(s, bx, by + 8, "Appearance", 16.0, theme.text);
+                let label = if theme.is_dark { "Theme:  Dark" } else { "Theme:  Light" };
+                fr.draw_text(s, bx, by + 44, label, 15.0, theme.text_dim);
+                fr.draw_text(s, bx, by + 96, "System", 16.0, theme.text);
+                fr.draw_text(s, bx, by + 132, "QOS 0.1  -  1280x800  -  USB kbd+mouse", 14.0, theme.text_dim);
+            }
+        }
+    }
+
+    fn draw_cursor(&self, s: &mut Surface) {
+        let (cx, cy) = self.cursor;
+        for (row, line) in CURSOR.iter().enumerate() {
+            for (col, ch) in line.bytes().enumerate() {
+                let color = match ch {
+                    b'#' => qos_ui::rgb(0x10, 0x12, 0x18),
+                    b'o' => qos_ui::rgb(0xff, 0xff, 0xff),
+                    _ => continue,
+                };
+                s.put(cx + col as i32, cy + row as i32, color);
+            }
+        }
+    }
+
+    fn compose(&self, s: &mut Surface, fr: &mut FontRenderer) {
+        let theme = &self.theme;
+        let (w, _h) = (self.w, self.h);
+        s.gradient_v(Rect::new(0, 0, self.w, self.h), theme.wallpaper_top, theme.wallpaper_bottom);
+
+        // Top menu bar.
+        s.blend_rect(Rect::new(0, 0, w, BAR_H), theme.bar, 215);
+        s.rounded_rect(Rect::new(12, 7, 16, 16), 5, theme.accent);
+        fr.draw_text(s, 36, 21, "QOS", 16.0, theme.text);
+        let mut mx = 84;
+        for item in ["File", "Edit", "View", "Window", "Help"] {
+            mx = fr.draw_text(s, mx, 21, item, 15.0, theme.text_dim) + 20;
+        }
+        // Theme toggle pill + clock.
+        let tb = self.theme_btn();
+        s.rounded_rect(tb, 11, theme.surface_alt);
+        let tlabel = if theme.is_dark { "Dark" } else { "Light" };
+        let tw = fr.text_width(tlabel, 13.0);
+        fr.draw_text(s, tb.x + (tb.w - tw) / 2, tb.y + 16, tlabel, 13.0, theme.text);
+        let clock = "12:42";
+        let cw = fr.text_width(clock, 15.0);
+        fr.draw_text(s, w - cw - 16, 21, clock, 15.0, theme.text);
+
+        // Windows in z-order (topmost last = focused).
+        let top = self.wins.len().saturating_sub(1);
+        for i in 0..self.wins.len() {
+            self.draw_window(s, fr, i, i == top);
+        }
+
+        // Dock with app icons (open apps get an accent underline dot).
+        let dock = self.dock_rect();
+        s.drop_shadow(dock, 20, 18, theme.shadow, if theme.is_dark { 140 } else { 70 });
+        s.rounded_rect_blend(dock, 20, theme.dock, 238);
+        for (i, &kind) in APPS.iter().enumerate() {
+            let ir = self.dock_icon_rect(i as i32);
+            s.rounded_rect(ir, 12, app_tint(kind, theme));
+            let initial = &app_title(kind)[..1];
+            let iw = fr.text_width(initial, 22.0);
+            fr.draw_text(s, ir.x + (ir.w - iw) / 2, ir.y + ir.h / 2 + 8, initial, 22.0, qos_ui::rgb(0xff, 0xff, 0xff));
+            if self.wins.iter().any(|win| win.kind == kind) {
+                circle(s, ir.x + ir.w / 2, ir.y + ir.h + 6, 5, theme.accent);
+            }
+        }
+
+        self.draw_cursor(s);
     }
 }
 
@@ -187,10 +403,13 @@ pub fn run_splash() {
     crate::framebuffer::reset_cursor();
 }
 
-/// Run the modern-desktop demo (opt-in via the `modern` shell command). Composes the scene, blits
-/// it, and loops: `t` toggles light/dark, `Esc` returns to the shell. Proves the compositor renders
-/// at native resolution before the widget toolkit lands.
+/// Run the interactive modern desktop (opt-in via the `modern` shell command, WP-05 step 4).
+/// Mouse: drag windows by their title bar, click the red dot to close, click a dock icon to open an
+/// app, click the top-right pill to toggle light/dark. Keyboard: `1`–`4` open apps, `w` closes the
+/// focused window, `t` toggles the theme, `Esc` returns to the shell. Only redraws when something
+/// changes (dirty flag) — idle frames just `hlt`.
 pub fn run_demo() {
+    use crate::input::{InputEvent, MouseButton};
     let info = match crate::framebuffer::info() {
         Some(i) => i,
         None => {
@@ -199,8 +418,6 @@ pub fn run_demo() {
         }
     };
     let (w, h) = (info.width, info.height);
-    let mut theme = Theme::dark();
-    let mut surface = Surface::new(w, h);
     let mut fr = match Font::parse(qos_ui::font::DEFAULT_FONT) {
         Some(f) => FontRenderer::new(f),
         None => {
@@ -208,28 +425,55 @@ pub fn run_demo() {
             return;
         }
     };
-
-    crate::serial_println!("[UI] modern compositor: {}x{} surface, native true-color", w, h);
-    compose(&mut surface, &mut fr, &theme);
-    crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+    let mut surface = Surface::new(w, h);
+    let mut desk = Desktop::new(w as i32, h as i32);
+    crate::serial_println!("[UI] modern desktop: {}x{} interactive window manager", w, h);
+    while crate::input::poll().is_some() {} // drop stale boot input
 
     loop {
-        if let Some(ev) = crate::input::poll() {
-            if let crate::input::InputEvent::Key { scancode, pressed: true } = ev {
-                match scancode {
-                    0x01 => break,       // Esc → back to shell
-                    0x14 => {            // 't' → toggle theme
-                        theme = theme.toggled();
-                        compose(&mut surface, &mut fr, &theme);
-                        crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+        // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
+        // normally queues the interrupt-IN report TRB), so drive it directly to keep USB keyboard +
+        // mouse alive on the desktop. Cheap (try_lock) and harmless alongside the scheduler.
+        crate::xhci::poll();
+        while let Some(ev) = crate::input::poll() {
+            match ev {
+                InputEvent::Key { scancode, pressed: true } => match scancode {
+                    0x01 => {
+                        crate::framebuffer::clear(0x000000);
+                        crate::framebuffer::reset_cursor();
+                        return; // Esc → shell
                     }
+                    0x14 => {
+                        desk.theme = desk.theme.toggled();
+                        desk.dirty = true;
+                    } // t
+                    0x02 => desk.open_app(AppKind::Terminal), // 1
+                    0x03 => desk.open_app(AppKind::Files),    // 2
+                    0x04 => desk.open_app(AppKind::Quantum),  // 3
+                    0x05 => desk.open_app(AppKind::Settings), // 4
+                    0x11 => {
+                        if desk.wins.pop().is_some() {
+                            desk.dirty = true;
+                        }
+                    } // w → close focused
                     _ => {}
+                },
+                InputEvent::MouseMove { dx, dy } => desk.on_mouse_move(dx, dy),
+                InputEvent::MouseButton { button: MouseButton::Left, pressed } => {
+                    if pressed {
+                        desk.on_left_down();
+                    } else {
+                        desk.on_left_up();
+                    }
                 }
+                _ => {}
             }
+        }
+        if desk.dirty {
+            desk.compose(&mut surface, &mut fr);
+            crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            desk.dirty = false;
         }
         crate::arch::hlt();
     }
-    // Leave the framebuffer text console in a clean state for the shell.
-    crate::framebuffer::clear(0x000000);
-    crate::framebuffer::reset_cursor();
 }

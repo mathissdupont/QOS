@@ -51,10 +51,16 @@ host-tested.
   `draw_text`). **26 host tests** (parse, cmap, ink, space-advance, layout). Wired into the `modern`
   desktop: crisp top-bar menu ("QOS File Edit View Window Help" + clock), window titles, button
   labels. Verified in QEMU (screenshot) — sharp antialiased text at native resolution.
-- [ ] **Step 4 — Widgets + window manager (E-72).** `Widget` trait, clip stack, z-ordered windows
-  (rounded + shadow + title bar), controls (button/label/textfield/list/scrollbar), top bar + dock,
-  light/dark toggle. `CompositorTask` drives it from the scheduler using the `input` queue
-  (keyboard + USB HID mouse). Verify: draggable window, working buttons, theme switch.
+- [x] **Step 4 — Window manager (E-72).** Interactive `Desktop` in `compositor`: z-ordered windows
+  (rounded + shadow + title bar + traffic-light dots + focus accent), a rendered arrow **cursor**,
+  a **dock** with app icons + open-indicators, and a top-bar **light/dark toggle** pill. Input from
+  the `input` queue: **mouse** drags windows by the title bar, clicks the red dot to close, clicks
+  a dock icon to open/raise an app, clicks the pill to toggle theme; **keyboard** `1`–`4` open apps,
+  `w` closes the focused window, `t` toggles theme, `Esc` exits. Redraws only on change (dirty
+  flag). `run_demo` pumps `xhci::poll()` so USB HID stays live while it owns the loop. Verified in
+  QEMU (screenshots): apps open via keys with distinct content, focus ring + dock dots, cursor
+  tracks mouse motion, and both light + dark themes render at native 1280×800. (Full generic
+  `Widget` trait/toolkit deferred; the WM covers the needed interactions.)
 - [ ] **Step 5 — Apps (E-73).** Terminal (wraps the shell), file manager (FAT16), Quantum Lab
   (modernizes `QuantumApp`), settings/system monitor, + further built-ins. Each app screenshot-
   verified.
