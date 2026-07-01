@@ -43,9 +43,14 @@ host-tested.
   `wait_for_continue`. Verified in QEMU (screenshot): crisp white octopus + "HEPTAPUS GROUP" on the
   themed background, 0 faults, boot reaches ready. Fix: drain stale boot input first so a queued key
   doesn't instantly skip the splash. New primitive: `Surface::blit_mask_scaled`.
-- [ ] **Step 3 — TrueType fonts (E-71).** Embed a permissively-licensed TTF; parse
-  head/cmap/loca/glyf/hmtx; rasterize outlines with coverage AA; glyph cache; text layout. Host
-  tests for parsing + a known glyph's coverage. Verify crisp text on screen.
+- [x] **Step 3 — TrueType fonts (E-71).** Embedded **Roboto Regular** (Apache-2.0; redistributable,
+  org-compliant — `assets/LICENSE-Roboto.txt`). New `qos_ui::font`: parse offset table +
+  head/maxp/hhea/hmtx/loca/glyf, cmap **format 4** char→glyph, simple **and composite** glyph
+  outlines, quadratic-Bézier flattening, and a **4× supersampled nonzero-winding rasterizer** →
+  antialiased coverage bitmaps, with a `FontRenderer` glyph cache + text layout (`text_width`,
+  `draw_text`). **26 host tests** (parse, cmap, ink, space-advance, layout). Wired into the `modern`
+  desktop: crisp top-bar menu ("QOS File Edit View Window Help" + clock), window titles, button
+  labels. Verified in QEMU (screenshot) — sharp antialiased text at native resolution.
 - [ ] **Step 4 — Widgets + window manager (E-72).** `Widget` trait, clip stack, z-ordered windows
   (rounded + shadow + title bar), controls (button/label/textfield/list/scrollbar), top bar + dock,
   light/dark toggle. `CompositorTask` drives it from the scheduler using the `input` queue

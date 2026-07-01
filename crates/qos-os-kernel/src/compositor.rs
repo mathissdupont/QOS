@@ -8,6 +8,7 @@
 //! Opt-in for now via the `modern` shell command (fallback-first, ADR-0015): it does not replace
 //! the legacy desktop until the toolkit is ready.
 
+use qos_ui::font::{Font, FontRenderer};
 use qos_ui::{Rect, Surface, Theme};
 
 /// Heptapus boot-splash logo coverage mask (WP-05 step 2): the octopus + "HEPTAPUS GROUP" shape,
@@ -23,8 +24,8 @@ fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
 }
 
 /// Draw one macOS/GNOME-hybrid window: soft drop shadow, rounded body, a header strip with the
-/// three traffic-light dots, and an accent button in the body.
-fn draw_window(s: &mut Surface, theme: &Theme, r: Rect) {
+/// three traffic-light dots, a centered title, and an accent button with a label.
+fn draw_window(s: &mut Surface, fr: &mut FontRenderer, theme: &Theme, r: Rect, title: &str, button: &str) {
     let radius = 14;
     // Soft drop shadow, offset slightly down for depth.
     s.drop_shadow(Rect::new(r.x, r.y + 6, r.w, r.h), radius, 22, theme.shadow, if theme.is_dark { 150 } else { 90 });
@@ -41,9 +42,15 @@ fn draw_window(s: &mut Surface, theme: &Theme, r: Rect) {
     circle(s, r.x + 22, cy, 14, qos_ui::rgb(0xff, 0x5f, 0x57)); // close (red)
     circle(s, r.x + 44, cy, 14, qos_ui::rgb(0xfe, 0xbc, 0x2e)); // minimize (yellow)
     circle(s, r.x + 66, cy, 14, qos_ui::rgb(0x28, 0xc8, 0x40)); // maximize (green)
-    // A primary accent button in the body.
+    // Centered window title.
+    let tsize = 18.0;
+    let tw = fr.text_width(title, tsize);
+    fr.draw_text(s, r.x + (r.w - tw) / 2, cy + 6, title, tsize, theme.text);
+    // A primary accent button with a centered label.
     let btn = Rect::new(r.x + 24, r.y + header_h + 28, 150, 40);
     s.rounded_rect(btn, 10, theme.accent);
+    let bw = fr.text_width(button, 16.0);
+    fr.draw_text(s, btn.x + (btn.w - bw) / 2, btn.y + 26, button, 16.0, theme.on_accent);
     // A couple of "content" rows to suggest a list.
     for i in 0..3 {
         let row = Rect::new(r.x + 24, r.y + header_h + 92 + i * 30, r.w - 48, 18);
@@ -52,7 +59,7 @@ fn draw_window(s: &mut Surface, theme: &Theme, r: Rect) {
 }
 
 /// Compose the full modern desktop scene into `s` for the given `theme`.
-fn compose(s: &mut Surface, theme: &Theme) {
+fn compose(s: &mut Surface, fr: &mut FontRenderer, theme: &Theme) {
     let (w, h) = (s.width as i32, s.height as i32);
 
     // Wallpaper: vertical gradient across the whole screen.
@@ -61,13 +68,20 @@ fn compose(s: &mut Surface, theme: &Theme) {
     // Top menu bar: translucent strip.
     let bar_h = 30;
     s.blend_rect(Rect::new(0, 0, w, bar_h), theme.bar, 210);
-    // Logo spot (accent rounded square) on the left + a "clock" pill on the right.
+    // Logo spot + name on the left, menu items, and a clock on the right — real antialiased text.
     s.rounded_rect(Rect::new(12, 7, 16, 16), 5, theme.accent);
-    s.rounded_rect(Rect::new(w - 92, 6, 80, 18), 9, theme.surface_alt);
+    fr.draw_text(s, 36, 21, "QOS", 16.0, theme.text);
+    let mut mx = 84;
+    for item in ["File", "Edit", "View", "Window", "Help"] {
+        mx = fr.draw_text(s, mx, 21, item, 15.0, theme.text_dim) + 20;
+    }
+    let clock = "12:42";
+    let cw = fr.text_width(clock, 15.0);
+    fr.draw_text(s, w - cw - 16, 21, clock, 15.0, theme.text);
 
-    // Two overlapping windows (shows z-order + shadows).
-    draw_window(s, theme, Rect::new(w / 2 - 440, 90, 520, 360));
-    draw_window(s, theme, Rect::new(w / 2 - 40, 240, 500, 330));
+    // Two overlapping windows (shows z-order + shadows + titles).
+    draw_window(s, fr, theme, Rect::new(w / 2 - 440, 90, 520, 360), "Terminal", "New");
+    draw_window(s, fr, theme, Rect::new(w / 2 - 40, 240, 500, 330), "Files", "Open");
 
     // Dock: centered translucent rounded panel with icon tiles.
     let dock_w = 460;
@@ -187,9 +201,16 @@ pub fn run_demo() {
     let (w, h) = (info.width, info.height);
     let mut theme = Theme::dark();
     let mut surface = Surface::new(w, h);
+    let mut fr = match Font::parse(qos_ui::font::DEFAULT_FONT) {
+        Some(f) => FontRenderer::new(f),
+        None => {
+            crate::println!("modern: font parse failed");
+            return;
+        }
+    };
 
     crate::serial_println!("[UI] modern compositor: {}x{} surface, native true-color", w, h);
-    compose(&mut surface, &theme);
+    compose(&mut surface, &mut fr, &theme);
     crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
 
     loop {
@@ -199,7 +220,7 @@ pub fn run_demo() {
                     0x01 => break,       // Esc → back to shell
                     0x14 => {            // 't' → toggle theme
                         theme = theme.toggled();
-                        compose(&mut surface, &theme);
+                        compose(&mut surface, &mut fr, &theme);
                         crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
                     }
                     _ => {}

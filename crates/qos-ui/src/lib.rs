@@ -15,12 +15,14 @@ extern crate alloc;
 
 pub mod color;
 pub mod dirty;
+pub mod font;
 pub mod geometry;
 pub mod surface;
 pub mod theme;
 
 pub use color::{blend, channels, lerp, rgb, scale_brightness, Rgb};
 pub use dirty::DirtyTracker;
+pub use font::{Font, FontRenderer, GlyphBitmap};
 pub use geometry::Rect;
 pub use surface::Surface;
 pub use theme::Theme;
