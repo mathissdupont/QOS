@@ -12,7 +12,10 @@ use x86_64::{
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub const HEAP_START: usize = 0x4444_4444_0000;
-pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+// 64 MiB — headroom for the modern UI (WP-05): a native-resolution true-color back buffer is
+// ~4 MB at 1280×800 and ~8 MB at 1920×1080, plus per-window surfaces, the glyph cache, and app
+// state. Mapped eagerly at boot; fits comfortably on any machine with ≥256 MiB RAM.
+pub const HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
