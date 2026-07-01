@@ -206,6 +206,12 @@ impl Surface {
                 let row = y * self.width;
                 for x in x0..x1 {
                     let (px, py) = (x as i32, y as i32);
+                    // Skip the interior: it is fully opaque shadow that the element drawn on top
+                    // (a rounded rect covering `r ⊇ inner`) will overwrite anyway. This avoids the
+                    // per-pixel isqrt over the large central area — the dominant shadow cost.
+                    if inner.contains(px, py) {
+                        continue;
+                    }
                     // Distance from the shadow's rounded core (the inner straight rect inflated by
                     // radius has rounded corners of `radius`; outside that, fall off over `blur`).
                     let dx = (inner.x - px).max(px - (inner.right() - 1)).max(0);

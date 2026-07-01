@@ -145,15 +145,15 @@ impl Desktop {
         self.cursor.0 = (self.cursor.0 + dx as i32).clamp(0, self.w - 1);
         // InputEvent dy is +up (PS/2 convention); screen y grows downward.
         self.cursor.1 = (self.cursor.1 - dy as i32).clamp(0, self.h - 1);
+        // Only a drag changes the scene; a bare cursor move is handled cheaply (save-under) by the
+        // caller, so it must NOT dirty (and thus fully recompose) the whole desktop.
         if let Some((idx, ox, oy)) = self.drag {
             if idx < self.wins.len() {
-                let nx = self.cursor.0 - ox;
-                let ny = (self.cursor.1 - oy).max(BAR_H);
-                self.wins[idx].rect.x = nx;
-                self.wins[idx].rect.y = ny;
+                self.wins[idx].rect.x = self.cursor.0 - ox;
+                self.wins[idx].rect.y = (self.cursor.1 - oy).max(BAR_H);
+                self.dirty = true;
             }
         }
-        self.dirty = true;
     }
 
     fn on_left_down(&mut self) {
@@ -263,20 +263,6 @@ impl Desktop {
         }
     }
 
-    fn draw_cursor(&self, s: &mut Surface) {
-        let (cx, cy) = self.cursor;
-        for (row, line) in CURSOR.iter().enumerate() {
-            for (col, ch) in line.bytes().enumerate() {
-                let color = match ch {
-                    b'#' => qos_ui::rgb(0x10, 0x12, 0x18),
-                    b'o' => qos_ui::rgb(0xff, 0xff, 0xff),
-                    _ => continue,
-                };
-                s.put(cx + col as i32, cy + row as i32, color);
-            }
-        }
-    }
-
     fn compose(&self, s: &mut Surface, fr: &mut FontRenderer) {
         let theme = &self.theme;
         let (w, _h) = (self.w, self.h);
@@ -320,8 +306,25 @@ impl Desktop {
                 circle(s, ir.x + ir.w / 2, ir.y + ir.h + 6, 5, theme.accent);
             }
         }
+    }
+}
 
-        self.draw_cursor(s);
+/// Cursor bitmap dimensions (for save-under).
+const CURSOR_W: usize = 11;
+const CURSOR_H: usize = 16;
+
+/// Draw the arrow cursor at `(cx, cy)` directly onto the framebuffer (only its ~90 opaque pixels),
+/// over whatever scene pixels are already there. Cheap — used for save-under cursor tracking.
+fn draw_cursor_fb(cx: i32, cy: i32) {
+    for (row, line) in CURSOR.iter().enumerate() {
+        for (col, ch) in line.bytes().enumerate() {
+            let color = match ch {
+                b'#' => 0x10_12_18u32,
+                b'o' => 0xFF_FF_FFu32,
+                _ => continue,
+            };
+            crate::framebuffer::put_pixel((cx + col as i32) as usize, (cy + row as i32) as usize, color);
+        }
     }
 }
 
@@ -580,6 +583,14 @@ pub fn run_demo() {
         crate::arch::hlt();
     }
 
+    // `surface` holds the composed desktop **without** the cursor; it mirrors what's on the
+    // framebuffer minus the cursor overlay. `last_cursor` is where the cursor was last drawn.
+    desk.compose(&mut surface, &mut fr);
+    crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+    let mut last_cursor = desk.cursor;
+    draw_cursor_fb(last_cursor.0, last_cursor.1);
+    desk.dirty = false;
+
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
         // normally queues the interrupt-IN report TRB), so drive it directly to keep USB keyboard +
@@ -620,9 +631,19 @@ pub fn run_demo() {
             }
         }
         if desk.dirty {
+            // Scene changed (window moved / opened / closed / theme): recompose + full blit, then
+            // redraw the cursor on top.
             desk.compose(&mut surface, &mut fr);
             crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            last_cursor = desk.cursor;
+            draw_cursor_fb(last_cursor.0, last_cursor.1);
             desk.dirty = false;
+        } else if desk.cursor != last_cursor {
+            // Cursor-only move: restore the scene under the old cursor (small blit) and draw the
+            // cursor at the new spot. No full recompose — this is what keeps the pointer smooth.
+            crate::framebuffer::blit_region(&surface.pixels, w, last_cursor.0 as usize, last_cursor.1 as usize, CURSOR_W, CURSOR_H);
+            last_cursor = desk.cursor;
+            draw_cursor_fb(last_cursor.0, last_cursor.1);
         }
         crate::arch::hlt();
     }
