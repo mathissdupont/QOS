@@ -23,7 +23,15 @@ use crate::pci::{self, PciDevice};
 
 /// Real hardware gateway for the driver core. MMIO goes through the bootloader's physical-memory
 /// offset mapping ([`crate::memory::mmio_virt_addr`]); port I/O through the arch helpers.
-struct KernelIo;
+///
+/// Zero-sized and stateless, so drivers that need MMIO access outside `probe` (e.g. the xHCI
+/// main-loop poll) can construct one on demand via [`kernel_io`].
+pub struct KernelIo;
+
+/// Construct a stateless [`KernelIo`] for MMIO/port access outside the probe path.
+pub fn kernel_io() -> KernelIo {
+    KernelIo
+}
 
 impl DeviceIo for KernelIo {
     fn mmio_read32(&self, addr: u64) -> u32 {

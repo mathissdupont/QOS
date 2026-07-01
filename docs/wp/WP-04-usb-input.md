@@ -28,8 +28,11 @@ modern laptops, which have no PS/2. Built on the driver model (WP-02) and the AP
   Device Context + **Address Device** → device addressed; (3c-2) **GET_DESCRIPTOR** via a control
   transfer on EP0 → vendor/product/class/bMaxPacketSize0. Context size read from HCCPARAMS1.CSZ
   (never assumed).
-- [ ] **Step 4 — HID boot protocol.** Set boot protocol; poll/interrupt the keyboard and mouse
-  endpoints; translate HID reports into unified `InputEvent`s.
+- [x] **Step 4 — HID boot protocol.** (4a) parse config → HID interrupt-IN endpoint,
+  SET_CONFIGURATION, SET_PROTOCOL(boot). (4b) Configure Endpoint (own transfer ring + Link TRB),
+  poll the endpoint from the kernel main loop, translate boot reports: keyboard HID usages →
+  PS/2 Set-1 scancodes via `keyboard::push_scancode` (feeds both the legacy buffer and the unified
+  queue, so consumers are unchanged); mouse reports → `InputEvent::MouseMove`/`MouseButton`.
 - [ ] **Step 5 — Interrupt-driven.** Route the xHCI interrupt (MSI, or its IO-APIC GSI) so input
   is event-driven rather than polled. (Needs PCIe MSI, E-12, or the IO-APIC line.)
 
@@ -53,33 +56,38 @@ succeeding.
   doorbell, wait Transfer Event cc=1) →
   `device descriptor: vendor=0x0627 product=0x0001 class=0x00 bMaxPacketSize0=64`. Values read
   from the device, 0 faults, boot reaches `QaOS ready`.
+- **Step 4 done (keyboard).** 4a: parsed the config descriptor →
+  `HID keyboard: iface=0 ep=0x81 maxpkt=8 interval=7 config=1`, `set-config=true
+  set-boot-protocol=true`. 4b: Configure Endpoint → `HID keyboard ready: endpoint DCI 3`; the
+  main loop polls the endpoint and translates reports. Verified by driving QEMU monitor `sendkey`
+  (usb-kbd now handled by us): typing `hello\n` produced the exact HID→Set-1 sequence
+  (`0x0b→0x23 h`, `0x08→0x12 e`, `0x0f→0x26 l`×2, `0x12→0x18 o`, `0x28→0x1c Enter`), pushed via
+  `keyboard::push_scancode` — the same path PS/2 uses, so it reaches the shell unchanged. 0 faults.
 
 ## Continuation notes (technical — resume here)
 
-State: `xhci.rs` has a `Xhci` controller in `CONTROLLER: Mutex<Option<Xhci>>`, brought up, with one
-device **addressed** and its **device descriptor read**. Helpers now exist for both the command
-ring (`submit_command`, `wait_command_completion`) and the EP0 transfer ring
-(`ep0_enqueue_trb(d0,d1,d2,d3_extra,type)`, `ring_ep0_doorbell(io)`, `wait_transfer_completion(io)`,
-and the full `get_device_descriptor(io) -> DeviceDescriptor`). `poll_event → (type,cc,slot)` drains
-both Command Completion (33) and Transfer (32) events. MMIO via `io: &mut dyn DeviceIo`; DMA pages
-via `alloc_dma_page() -> (phys, virt)`; `read64_lo_hi_write` for 64-bit regs. Fields to reuse:
-`ep0_ring_virt/phys`, `ep0_enqueue`, `ep0_cycle`, `dev_slot`, `context_size`, `dcbaa_virt`.
+State: `xhci.rs` has a `Xhci` in `CONTROLLER: Mutex<Option<Xhci>>`, brought up, with one device
+**addressed**, its **descriptor read**, and its **HID interrupt-IN endpoint configured + polled**.
+Helpers: command ring (`submit_command`, `wait_command_completion`), EP0 control transfers
+(`control_transfer(io, req_type, request, value, index, data_phys, length, dir_in)`,
+`get_device_descriptor`, `get_hid_interface`, `set_configuration`, `set_boot_protocol`), endpoint
+config + polling (`configure_endpoint(io,&HidInterface)`, `hid_queue_report`, `try_event`,
+`poll_hid`, `process_report` → `process_keyboard_report`/`process_mouse_report`, `hid_to_set1`).
+Module-level `xhci::poll()` is called from `runtime.rs` main loop. MMIO via
+`crate::device::kernel_io()`. Fields to reuse: `dev_slot/dev_port/dev_speed`, `hid_*`, `context_size`.
 
-**Step 4 — HID boot protocol (resume here).** Reuse the EP0 control-transfer path
-(`ep0_enqueue_trb` + `ring_ep0_doorbell` + `wait_transfer_completion`) for the standard requests:
-1. GET_DESCRIPTOR(configuration, wLength large enough) → parse for the HID **interrupt-IN**
-   endpoint: bEndpointAddress, wMaxPacketSize, bInterval, and the interface number/bNumConfigs.
-2. SET_CONFIGURATION(bConfigurationValue) (control transfer, no data stage).
-3. SET_PROTOCOL(boot=0) on the HID interface (`bmRequestType=0x21, bRequest=0x0B, wValue=0`).
-4. Configure that endpoint: build an Input Context adding the interrupt-IN EP (EPType=7 IN,
-   its own transfer ring), issue a **Configure Endpoint** command (TRB type 12).
-5. Queue a Normal TRB (type 1) with an 8-byte DMA buffer on that endpoint's ring, ring its doorbell
-   (DB target = the endpoint's DCI), and on the Transfer Event read the boot report (byte0
-   modifiers, bytes2–7 keycodes for keyboard; 3-byte for mouse). Translate to
-   `crate::input::InputEvent` and push to the queue. Poll for now; interrupt-drive in Step 5.
+**Step 5 — interrupt-driven (resume here).** Replace main-loop polling with interrupt delivery:
+enable the xHCI interrupter (IMAN.IE + USBCMD.INTE), and either (a) route the controller's PCI
+`interrupt_line` through the IO-APIC to a vector whose ISR calls into `poll_hid`, or (b) implement
+PCIe MSI (epic E-12) and use that. On the interrupt, drain the event ring and re-queue the report
+TRB. Keep `poll()` as a fallback.
 
-**Step 5 — interrupt-driven.** Enable the xHCI interrupter (IMAN) and route its IRQ (the PCI
-`interrupt_line` via the IO-APIC, or MSI once E-12 lands) instead of polling.
+**Gap — multi-device / mouse.** Enumeration currently addresses only the **first** enabled port
+(the keyboard, port 5), so the mouse (port 6) isn't brought up yet. `process_mouse_report` exists
+and is exercised for whichever single device is a mouse, but to get *both* keyboard and mouse we
+need per-slot device state: loop over all enabled ports, Enable Slot + Address Device + configure
+each, and store a small array of HID devices that `poll_hid` iterates. Do this alongside or before
+Step 5.
 
 ## Notes & gaps
 

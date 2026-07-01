@@ -31,6 +31,8 @@ extern "C" fn kernel_loop_entry() -> ! {
     loop {
         // Process quantum work from main loop (NOT interrupt) to avoid deadlocks
         syscall::process_quantum_work();
+        // Poll USB HID input (WP-04 step 4b) until it becomes interrupt-driven (step 5).
+        crate::xhci::poll();
         sched.step();
         arch::hlt();
     }
