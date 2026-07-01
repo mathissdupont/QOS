@@ -174,26 +174,58 @@ fn speed_name(speed: u32) -> &'static str {
     }
 }
 
-/// Scan the root-hub ports (WP-04 step 3a): read each PORTSC and log which ports have a device
-/// connected and at what speed. PORTSC for port `i` (1-based) is at op_base + 0x400 + (i-1)*0x10.
-/// Returns the number of connected ports found.
+// PORTSC bits.
+const PORTSC_CCS: u32 = 1 << 0; // Current Connect Status (RO)
+const PORTSC_PED: u32 = 1 << 1; // Port Enabled/Disabled (RW1C to disable)
+const PORTSC_PR: u32 = 1 << 4; // Port Reset
+const PORTSC_PP: u32 = 1 << 9; // Port Power
+const PORTSC_PRC: u32 = 1 << 21; // Port Reset Change (RW1C)
+
+fn portsc_addr(op_base: u64, port: u32) -> u64 {
+    op_base + 0x400 + (port as u64 - 1) * 0x10
+}
+
+/// Reset one root-hub port and return whether it ended up enabled (WP-04 step 3b-1). Writing only
+/// `PP | PR` keeps the RW1C status-change bits (and PED, which is RW1C-to-disable) untouched, so
+/// we don't accidentally clear/disable anything. USB3 ports auto-enable after reset; USB2 need it.
+fn reset_port(op_base: u64, port: u32, io: &mut dyn DeviceIo) -> bool {
+    let addr = portsc_addr(op_base, port);
+    io.mmio_write32(addr, PORTSC_PP | PORTSC_PR);
+    // Hardware clears PR when the reset completes.
+    if !wait_bit(io, addr, PORTSC_PR, false) {
+        return false;
+    }
+    let v = io.mmio_read32(addr);
+    // Acknowledge the reset-change bit (RW1C), preserving power.
+    io.mmio_write32(addr, PORTSC_PP | PORTSC_PRC);
+    v & PORTSC_PED != 0
+}
+
+/// Scan + reset the root-hub ports (WP-04 step 3): detect connected ports (3a) and reset each so
+/// it becomes enabled (3b-1). Logs the result; returns the number of enabled ports.
 fn scan_ports(op_base: u64, max_ports: u32, io: &mut dyn DeviceIo) -> u32 {
     let mut connected = 0;
+    let mut enabled_count = 0;
     for port in 1..=max_ports {
-        let portsc = io.mmio_read32(op_base + 0x400 + (port as u64 - 1) * 0x10);
-        let ccs = portsc & 1; // Current Connect Status
-        if ccs != 0 {
+        let portsc = io.mmio_read32(portsc_addr(op_base, port));
+        if portsc & PORTSC_CCS != 0 {
             connected += 1;
-            let enabled = (portsc >> 1) & 1;
             let speed = (portsc >> 10) & 0xF;
+            let enabled = reset_port(op_base, port, io);
+            if enabled {
+                enabled_count += 1;
+            }
             crate::serial_println!(
-                "[XHCI] port {}: device connected, speed={} ({}), enabled={}",
+                "[XHCI] port {}: device connected (speed {} {}), after reset enabled={}",
                 port, speed, speed_name(speed), enabled
             );
         }
     }
-    crate::serial_println!("[XHCI] port scan: {}/{} ports have a device", connected, max_ports);
-    connected
+    crate::serial_println!(
+        "[XHCI] ports: {} connected, {} enabled (of {})",
+        connected, enabled_count, max_ports
+    );
+    enabled_count
 }
 
 pub struct XhciDriver;
