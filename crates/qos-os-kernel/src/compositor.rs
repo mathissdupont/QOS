@@ -428,7 +428,13 @@ pub fn run_demo() {
     let mut surface = Surface::new(w, h);
     let mut desk = Desktop::new(w as i32, h as i32);
     crate::serial_println!("[UI] modern desktop: {}x{} interactive window manager", w, h);
-    while crate::input::poll().is_some() {} // drop stale boot input
+    // Flush input left over from the launching command (e.g. the Enter key-up USB report still in
+    // flight): pump USB and drain the queue over ~250 ms so nothing leaks into the interactive loop.
+    for _ in 0..25 {
+        crate::xhci::poll();
+        while crate::input::poll().is_some() {}
+        crate::arch::hlt();
+    }
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
