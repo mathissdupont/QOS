@@ -74,7 +74,11 @@ toggle, and working built-in apps driven by USB keyboard + mouse.
 
 ## Progress log
 
-- (pending first delivery)
+- **Boot flow.** After the splash a **boot chooser** (`compositor::boot_choice`) offers *Modern
+  Desktop* vs *Terminal* — keyboard (Enter/D/1 vs S/2/Esc) or a mouse click on either card, with an
+  ~8 s countdown that defaults to the desktop, so the UI comes up on its own. Choosing Desktop runs
+  the interactive WM; `Esc` inside it drops to the shell (where `modern` relaunches it). Verified in
+  QEMU: boot → Heptapus splash → welcome chooser → desktop.
 
 ## Notes & gaps
 

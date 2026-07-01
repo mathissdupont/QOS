@@ -175,6 +175,11 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
     {
         if framebuffer::active() {
             compositor::run_splash();
+            // Offer a boot choice: the modern desktop or the text shell. Choosing the desktop runs
+            // it here; pressing Esc inside it drops back to the shell below.
+            if compositor::boot_choice() {
+                compositor::run_demo();
+            }
         } else {
             splash::wait_for_continue();
         }

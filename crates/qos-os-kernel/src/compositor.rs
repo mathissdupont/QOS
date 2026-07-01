@@ -403,6 +403,150 @@ pub fn run_splash() {
     crate::framebuffer::reset_cursor();
 }
 
+/// Boot chooser shown after the splash (WP-05): pick the **Modern Desktop** or the **Terminal
+/// (shell)**. Keyboard `Enter`/`D`/`1` or a click on the left card → desktop (`true`); `S`/`2` or
+/// the right card → shell (`false`); `Esc` → shell. If nothing is pressed it defaults to the
+/// desktop after a short countdown, so the UI comes up on its own. No-op → `true` without a
+/// framebuffer.
+pub fn boot_choice() -> bool {
+    let info = match crate::framebuffer::info() {
+        Some(i) => i,
+        None => return false,
+    };
+    let (w, h) = (info.width, info.height);
+    let (wi, hi) = (w as i32, h as i32);
+    let mut fr = match Font::parse(qos_ui::font::DEFAULT_FONT) {
+        Some(f) => FontRenderer::new(f),
+        None => return true,
+    };
+    let mut surface = Surface::new(w, h);
+    let theme = Theme::dark();
+
+    let card_w = 300;
+    let card_h = 190;
+    let gap = 44;
+    let cy = hi / 2 + 95; // below the title + subtitle
+    let desktop_card = Rect::new(wi / 2 - card_w - gap / 2, cy - card_h / 2, card_w, card_h);
+    let shell_card = Rect::new(wi / 2 + gap / 2, cy - card_h / 2, card_w, card_h);
+
+    const TIMEOUT: i32 = 800; // ~8 s at 100 Hz, then default to the desktop
+    // flush stale input
+    for _ in 0..20 {
+        crate::xhci::poll();
+        while crate::input::poll().is_some() {}
+        crate::arch::hlt();
+    }
+    let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
+    let mut cursor = (wi / 2, hi / 2);
+    let mut last_sec = -1;
+
+    loop {
+        crate::xhci::poll();
+        while let Some(ev) = crate::input::poll() {
+            match ev {
+                crate::input::InputEvent::Key { scancode, pressed: true } => match scancode {
+                    0x1C | 0x20 | 0x02 => return true,  // Enter / D / 1 → desktop
+                    0x1F | 0x03 | 0x01 => return false, // S / 2 / Esc → shell
+                    _ => {}
+                },
+                crate::input::InputEvent::MouseMove { dx, dy } => {
+                    cursor.0 = (cursor.0 + dx as i32).clamp(0, wi - 1);
+                    cursor.1 = (cursor.1 - dy as i32).clamp(0, hi - 1);
+                    last_sec = -1; // force redraw so the cursor moves
+                }
+                crate::input::InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: true } => {
+                    if desktop_card.contains(cursor.0, cursor.1) {
+                        return true;
+                    }
+                    if shell_card.contains(cursor.0, cursor.1) {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let elapsed = (crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64 - start) as i32;
+        if elapsed >= TIMEOUT {
+            return true;
+        }
+        let sec = (TIMEOUT - elapsed) / 100;
+        if sec != last_sec {
+            // Redraw the chooser (background, logo, title, two cards, countdown, cursor).
+            surface.gradient_v(Rect::new(0, 0, wi, hi), theme.wallpaper_top, theme.wallpaper_bottom);
+            let logo = 150;
+            surface.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, Rect::new(wi / 2 - logo / 2, hi / 6, logo, logo), theme.text, 255);
+            let title = "Welcome to QOS";
+            let tw = fr.text_width(title, 34.0);
+            fr.draw_text(&mut surface, wi / 2 - tw / 2, hi / 6 + logo + 40, title, 34.0, theme.text);
+            let sub = "Choose how to start";
+            let sw = fr.text_width(sub, 17.0);
+            fr.draw_text(&mut surface, wi / 2 - sw / 2, hi / 6 + logo + 72, sub, 17.0, theme.text_dim);
+
+            // Desktop card (accent) + Shell card (surface).
+            surface.drop_shadow(desktop_card, 16, 18, theme.shadow, 130);
+            surface.rounded_rect(desktop_card, 16, theme.accent);
+            let d1 = "Modern Desktop";
+            let d1w = fr.text_width(d1, 22.0);
+            fr.draw_text(&mut surface, desktop_card.x + (card_w - d1w) / 2, desktop_card.y + 88, d1, 22.0, theme.on_accent);
+            let d2 = "Enter  /  D";
+            let d2w = fr.text_width(d2, 15.0);
+            fr.draw_text(&mut surface, desktop_card.x + (card_w - d2w) / 2, desktop_card.y + 130, d2, 15.0, theme.on_accent);
+
+            surface.drop_shadow(shell_card, 16, 18, theme.shadow, 100);
+            surface.rounded_rect(shell_card, 16, theme.surface);
+            let s1 = "Terminal";
+            let s1w = fr.text_width(s1, 22.0);
+            fr.draw_text(&mut surface, shell_card.x + (card_w - s1w) / 2, shell_card.y + 88, s1, 22.0, theme.text);
+            let s2 = "S";
+            let s2w = fr.text_width(s2, 15.0);
+            fr.draw_text(&mut surface, shell_card.x + (card_w - s2w) / 2, shell_card.y + 130, s2, 15.0, theme.text_dim);
+
+            // Countdown hint.
+            let mut buf = [0u8; 48];
+            let hint = fmt_countdown(&mut buf, sec.max(0));
+            let hw = fr.text_width(hint, 14.0);
+            fr.draw_text(&mut surface, wi / 2 - hw / 2, shell_card.bottom() + 44, hint, 14.0, theme.text_dim);
+
+            // Cursor.
+            for (row, line) in CURSOR.iter().enumerate() {
+                for (col, ch) in line.bytes().enumerate() {
+                    let color = match ch {
+                        b'#' => qos_ui::rgb(0x10, 0x12, 0x18),
+                        b'o' => qos_ui::rgb(0xff, 0xff, 0xff),
+                        _ => continue,
+                    };
+                    surface.put(cursor.0 + col as i32, cursor.1 + row as i32, color);
+                }
+            }
+            crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            last_sec = sec;
+        }
+        crate::arch::hlt();
+    }
+}
+
+/// Format "Starting the desktop in Ns..." into `buf`, returning the &str (no_std, no alloc).
+fn fmt_countdown(buf: &mut [u8; 48], sec: i32) -> &str {
+    let prefix = b"Starting the desktop in ";
+    let mut n = 0;
+    for &b in prefix {
+        buf[n] = b;
+        n += 1;
+    }
+    let s = sec.clamp(0, 99);
+    if s >= 10 {
+        buf[n] = b'0' + (s / 10) as u8;
+        n += 1;
+    }
+    buf[n] = b'0' + (s % 10) as u8;
+    n += 1;
+    for &b in b"s..." {
+        buf[n] = b;
+        n += 1;
+    }
+    core::str::from_utf8(&buf[..n]).unwrap_or("Starting...")
+}
+
 /// Run the interactive modern desktop (opt-in via the `modern` shell command, WP-05 step 4).
 /// Mouse: drag windows by their title bar, click the red dot to close, click a dock icon to open an
 /// app, click the top-right pill to toggle light/dark. Keyboard: `1`–`4` open apps, `w` closes the
