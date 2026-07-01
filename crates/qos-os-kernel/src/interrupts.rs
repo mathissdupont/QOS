@@ -16,6 +16,12 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
 /// Local-APIC spurious interrupt vector (E-10). Any vector > 31; conventionally 0xFF.
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
+/// Vector the local-APIC timer delivers on once we move the scheduler tick off the PIT (E-10).
+pub const APIC_TIMER_VECTOR: u8 = 0x40;
+
+/// True once the scheduler tick is delivered by the local-APIC timer (EOI goes to the APIC, not
+/// the PIC). Set by `apic::start_apic_timer_100hz`.
+pub static APIC_TIMER: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy)]
 #[repr(u8)]
@@ -61,6 +67,14 @@ lazy_static! {
         }
         idt[InterruptIndex::Keyboard.as_u8()].set_handler_fn(keyboard_interrupt_handler);
         idt[InterruptIndex::Mouse.as_u8()].set_handler_fn(mouse_interrupt_handler);
+
+        // Local-APIC timer (E-10): same preemptive ISR as the PIT timer, on its own vector. The
+        // scheduler tick moves here once `apic::start_apic_timer_100hz` runs; `timer_dispatch`
+        // then EOIs the local APIC instead of the PIC.
+        unsafe {
+            idt[APIC_TIMER_VECTOR]
+                .set_handler_addr(x86_64::VirtAddr::new(crate::asm_stubs::asm_timer_isr as usize as u64));
+        }
 
         // Local-APIC spurious vector (E-10): fired by the APIC on rare conditions; needs a
         // present IDT entry so it doesn't #GP, and requires NO end-of-interrupt.
@@ -220,9 +234,14 @@ pub extern "C" fn timer_dispatch(saved_rsp: u64) -> u64 {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::syscall::on_timer_tick();
 
-    // Acknowledge the interrupt before any potential context switch.
-    unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+    // Acknowledge the interrupt before any potential context switch. Once the tick is delivered
+    // by the local-APIC timer, EOI goes to the APIC; until then it goes to the 8259 PIC.
+    if APIC_TIMER.load(Ordering::SeqCst) {
+        crate::apic::eoi();
+    } else {
+        unsafe {
+            PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        }
     }
 
     if crate::kthread::armed() {

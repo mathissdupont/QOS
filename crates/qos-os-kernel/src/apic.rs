@@ -37,7 +37,7 @@ fn read_sdt(phys: u64) -> Option<Vec<u8>> {
     Some(phys_read(phys, len))
 }
 
-// ── Local APIC (E-10 slice 2) ────────────────────────────────────────────────────────────────
+// ── Local APIC (E-10 slices 2–3) ─────────────────────────────────────────────────────────────
 // Register offsets within the local-APIC MMIO page.
 mod lapic_reg {
     pub const ID: u64 = 0x20;
@@ -45,10 +45,25 @@ mod lapic_reg {
     pub const TPR: u64 = 0x80; // Task Priority Register
     pub const EOI: u64 = 0xB0;
     pub const SVR: u64 = 0xF0; // Spurious Interrupt Vector Register
+    pub const LVT_TIMER: u64 = 0x320;
+    pub const TIMER_INIT_COUNT: u64 = 0x380;
+    pub const TIMER_CUR_COUNT: u64 = 0x390;
+    pub const TIMER_DIVIDE: u64 = 0x3E0;
 }
 
 /// IA32_APIC_BASE MSR: bit 11 = APIC global enable, bit 8 = BSP.
 const IA32_APIC_BASE: u32 = 0x1B;
+
+/// Local-APIC timer divide-configuration value for "divide by 16" (bits [3,1,0] = 0b011).
+const TIMER_DIV_16: u32 = 0b0011;
+/// LVT Timer periodic mode = bits 18:17 == 0b01.
+const LVT_TIMER_PERIODIC: u32 = 1 << 17;
+/// LVT mask bit.
+const LVT_MASKED: u32 = 1 << 16;
+
+/// Cached local-APIC MMIO virtual base (0 until enabled), so `eoi()` needs no argument from the
+/// interrupt path.
+static LOCAL_APIC_BASE_VIRT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 fn lapic_read(base_virt: u64, reg: u64) -> u32 {
     unsafe { core::ptr::read_volatile((base_virt + reg) as *const u32) }
@@ -57,36 +72,91 @@ fn lapic_write(base_virt: u64, reg: u64, val: u32) {
     unsafe { core::ptr::write_volatile((base_virt + reg) as *mut u32, val) }
 }
 
-/// Software-enable the local APIC (E-10 slice 2). This does **not** reroute any interrupts: the
-/// 8259 PIC keeps delivering the timer/keyboard/mouse IRQs. It only brings the local APIC online
-/// (global-enable via IA32_APIC_BASE, software-enable + spurious vector via the SVR) and drops the
-/// task priority so it will accept interrupts — the groundwork for the IO-APIC/APIC-timer slice.
+pub fn is_enabled() -> bool {
+    LOCAL_APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed) != 0
+}
+
+/// Software-enable the local APIC (E-10 slice 2). Does **not** reroute interrupts: the 8259 PIC
+/// keeps delivering timer/keyboard/mouse. It brings the local APIC online (global-enable via
+/// IA32_APIC_BASE, software-enable + spurious vector via the SVR) and drops TPR so it accepts
+/// interrupts — groundwork for the APIC-timer slice.
 pub fn enable_local_apic(local_apic_phys: u64) {
-    // Ensure the global enable bit is set (firmware usually leaves it on under UEFI).
     unsafe {
         let mut msr = x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE);
         let val = msr.read();
         msr.write(val | (1 << 11));
     }
     let base = crate::memory::mmio_virt_addr(local_apic_phys).as_u64();
+    LOCAL_APIC_BASE_VIRT.store(base, core::sync::atomic::Ordering::Relaxed);
     let id = lapic_read(base, lapic_reg::ID) >> 24;
     let version = lapic_read(base, lapic_reg::VERSION) & 0xFF;
-    // Accept all interrupt priorities.
     lapic_write(base, lapic_reg::TPR, 0);
-    // Software-enable (bit 8) with the spurious vector in the low byte.
     lapic_write(base, lapic_reg::SVR, 0x100 | crate::interrupts::SPURIOUS_VECTOR as u32);
     crate::serial_println!(
         "[APIC] local APIC enabled: id={} version={:#x} svr={:#x}",
-        id,
-        version,
-        lapic_read(base, lapic_reg::SVR)
+        id, version, lapic_read(base, lapic_reg::SVR)
     );
 }
 
-/// Signal end-of-interrupt to the local APIC (for APIC-delivered interrupts in later slices).
-pub fn eoi(local_apic_phys: u64) {
-    let base = crate::memory::mmio_virt_addr(local_apic_phys).as_u64();
-    lapic_write(base, lapic_reg::EOI, 0);
+/// Signal end-of-interrupt to the local APIC (for APIC-delivered interrupts, e.g. the APIC timer).
+pub fn eoi() {
+    let base = LOCAL_APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed);
+    if base != 0 {
+        lapic_write(base, lapic_reg::EOI, 0);
+    }
+}
+
+/// Replace the PIT scheduler tick with the local-APIC timer at ~100 Hz (E-10 slice 3). The timer
+/// is internal to the local APIC, so this needs **no** IO-APIC — external IRQs (keyboard/mouse)
+/// stay on the PIC until the IO-APIC slice. Steps: calibrate the APIC timer frequency against a
+/// PIT channel-2 busy-wait, mask the PIT IRQ0, switch `timer_dispatch` to EOI the APIC, then start
+/// the periodic APIC timer on its own vector. Self-tests that ticks advance before returning.
+pub fn start_apic_timer_100hz() {
+    let base = LOCAL_APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed);
+    if base == 0 {
+        crate::serial_println!("[APIC] timer: local APIC not enabled, staying on PIT");
+        return;
+    }
+
+    // Calibrate: run the timer masked at max count for 10 ms and see how far it counted down.
+    lapic_write(base, lapic_reg::TIMER_DIVIDE, TIMER_DIV_16);
+    lapic_write(base, lapic_reg::LVT_TIMER, LVT_MASKED | crate::interrupts::APIC_TIMER_VECTOR as u32);
+    lapic_write(base, lapic_reg::TIMER_INIT_COUNT, 0xFFFF_FFFF);
+    crate::pit::busy_wait_us(10_000); // 10 ms
+    let elapsed = 0xFFFF_FFFFu32.wrapping_sub(lapic_read(base, lapic_reg::TIMER_CUR_COUNT));
+    lapic_write(base, lapic_reg::TIMER_INIT_COUNT, 0); // stop
+    let ticks_per_10ms = elapsed.max(1); // 10 ms period → 100 Hz
+    crate::serial_println!(
+        "[APIC] timer calibrated: {} ticks/10ms (~{} MHz at div16)",
+        ticks_per_10ms,
+        (ticks_per_10ms as u64 * 100 * 16) / 1_000_000
+    );
+
+    // Mask PIT IRQ0 on the master PIC so channel 0 no longer delivers the tick.
+    unsafe {
+        let mask = crate::arch::inb(0x21);
+        crate::arch::outb(0x21, mask | 0x01);
+    }
+    // From now on the tick is APIC-delivered: `timer_dispatch` must EOI the local APIC.
+    crate::interrupts::APIC_TIMER.store(true, core::sync::atomic::Ordering::SeqCst);
+
+    // Start the periodic APIC timer on its own vector (IDT entry installed at build time).
+    lapic_write(base, lapic_reg::TIMER_DIVIDE, TIMER_DIV_16);
+    lapic_write(
+        base,
+        lapic_reg::LVT_TIMER,
+        LVT_TIMER_PERIODIC | crate::interrupts::APIC_TIMER_VECTOR as u32,
+    );
+    lapic_write(base, lapic_reg::TIMER_INIT_COUNT, ticks_per_10ms);
+
+    // Self-test: with the PIT masked, ticks can only advance if the APIC timer is firing.
+    use core::sync::atomic::Ordering::Relaxed;
+    let before = crate::interrupts::TICKS.load(Relaxed);
+    for _ in 0..10 {
+        crate::pit::busy_wait_us(10_000); // ~100 ms total
+    }
+    let advanced = crate::interrupts::TICKS.load(Relaxed).wrapping_sub(before);
+    crate::serial_println!("[APIC] timer active: {} ticks in ~100ms (PIT masked)", advanced);
 }
 
 /// Result of discovery, cached for later slices (APIC enable, IRQ routing, SMP).
@@ -169,6 +239,8 @@ pub fn init(rsdp_phys: u64) -> AcpiInfo {
             );
             // Slice 2: bring the local APIC online (does not reroute IRQs; PIC still drives them).
             enable_local_apic(m.local_apic_address);
+            // Slice 3: move the scheduler tick from the PIT to the local-APIC timer.
+            start_apic_timer_100hz();
         }
         None => crate::serial_println!("[APIC] MADT not found"),
     }
