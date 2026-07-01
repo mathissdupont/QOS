@@ -21,7 +21,7 @@ modern laptops, which have no PS/2. Built on the driver model (WP-02) and the AP
 
 - [x] **Step 1 — Detect the xHCI controller.** Match PCI class 0x0C/0x03 via the driver model;
   read the capability registers (CAPLENGTH, HCIVERSION, HCSPARAMS1 → max ports/slots) and log.
-- [ ] **Step 2 — Controller bring-up.** Reset the controller; set up the Device Context Base
+- [x] **Step 2 — Controller bring-up.** Reset the controller; set up the Device Context Base
   Address Array, the Command Ring, the Event Ring, and the run/stop + interrupter registers; run.
 - [ ] **Step 3 — Port + device enumeration.** Detect connected ports, reset them, assign slots
   and addresses via control transfers; read device/config descriptors.
