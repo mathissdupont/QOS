@@ -1,6 +1,6 @@
 # WP-04: USB host controller + HID input
 
-- Status: 🟡 in progress
+- Status: ✅ done (keyboard + mouse, interrupt-driven; hubs/hotplug deferred)
 - Epic: E-20 (USB core/xHCI), E-21 (USB HID)
 - ADRs: ADR-0015 (modern hardware), ADR-0016 (driver model)
 - Commits: (this WP, appended as delivered)
@@ -33,8 +33,11 @@ modern laptops, which have no PS/2. Built on the driver model (WP-02) and the AP
   poll the endpoint from the kernel main loop, translate boot reports: keyboard HID usages →
   PS/2 Set-1 scancodes via `keyboard::push_scancode` (feeds both the legacy buffer and the unified
   queue, so consumers are unchanged); mouse reports → `InputEvent::MouseMove`/`MouseButton`.
-- [ ] **Step 5 — Interrupt-driven.** Route the xHCI interrupt (MSI, or its IO-APIC GSI) so input
-  is event-driven rather than polled. (Needs PCIe MSI, E-12, or the IO-APIC line.)
+- [x] **Step 5 — Interrupt-driven (MSI-X).** The controller exposes only MSI-X (cap 0x11), so route
+  interrupter 0 through an MSI-X table entry that targets this CPU's local APIC (address
+  `0xFEE0_0000 | apic_id<<12`, data = vector 0x41). Enable IMAN.IE + USBCMD.INTE (clearing stale
+  EINT/IP first). The ISR acknowledges (EINT/IP) and drains the event ring. Universal: MSI-X is a
+  plain memory write to the APIC, needing no ACPI interrupt-routing tables.
 
 ## Acceptance criteria
 
@@ -76,11 +79,19 @@ config + polling (`configure_endpoint(io,&HidInterface)`, `hid_queue_report`, `t
 Module-level `xhci::poll()` is called from `runtime.rs` main loop. MMIO via
 `crate::device::kernel_io()`. Fields to reuse: `dev_slot/dev_port/dev_speed`, `hid_*`, `context_size`.
 
-**Step 5 — interrupt-driven (resume here).** Replace main-loop polling with interrupt delivery:
-enable the xHCI interrupter (IMAN.IE + USBCMD.INTE), and either (a) route the controller's PCI
-`interrupt_line` through the IO-APIC to a vector whose ISR calls into `poll_hid`, or (b) implement
-PCIe MSI (epic E-12) and use that. On the interrupt, drain the event ring and re-queue the report
-TRB. Keep `poll()` as a fallback.
+**Step 5 — interrupt-driven — done (MSI-X).** `enable_msix` finds the MSI-X capability (0x11) on
+the controller's PCI device, programs table entry 0 (in BAR0 @ 0x3000) to target the local APIC at
+vector `interrupts::XHCI_VECTOR` (0x41), enables it, clears stale EINT/IP, and sets IMAN.IE +
+USBCMD.INTE. The IDT vector → `interrupts::xhci_interrupt_handler` → `xhci::on_interrupt` (acks
+EINT/IP via published `XHCI_OP_BASE`/`XHCI_RUNTIME_BASE`, drains via `poll_hid`) → local-APIC EOI.
+`poll()` stays in the main loop for the initial TRB queue + as a fallback. Verified: typing "qos"
+produced IRQs #1/#3/#5 with correct HID→Set-1 translation; 0 faults. New PCI helpers:
+`config_read16/32`, `config_write16/32`, `find_capability`, `capabilities` (pci.rs);
+`apic::local_apic_id()`.
+
+**Remaining (future WPs, not blocking):** USB hubs (multi-tier), hotplug (Port Status Change
+Events at runtime), non-boot HID report descriptors, and migrating the interrupt off the main-loop
+`poll()` initial-queue entirely. BAR *size* probing (resource `len` still 0) also still open.
 
 **Multi-device — done.** Enumeration now loops over **every** enabled port (`enumerate_port`),
 giving each device its own slot + interrupt endpoint, stored in `hid_devices: Vec<HidEndpoint>`.

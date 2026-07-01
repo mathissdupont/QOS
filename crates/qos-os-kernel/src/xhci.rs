@@ -37,14 +37,21 @@ const OP_CONFIG: u64 = 0x38; // MaxSlotsEn in bits [7:0]
 
 const USBCMD_RS: u32 = 1 << 0; // Run/Stop
 const USBCMD_HCRST: u32 = 1 << 1; // Host Controller Reset
+const USBCMD_INTE: u32 = 1 << 2; // Interrupter Enable (global)
 const USBSTS_HCH: u32 = 1 << 0; // HCHalted
+const USBSTS_EINT: u32 = 1 << 3; // Event Interrupt (RW1C)
 const USBSTS_CNR: u32 = 1 << 11; // Controller Not Ready
 
 // Interrupter 0 registers (offset from IR0 = runtime base + 0x20).
 const IR0: u64 = 0x20;
+const IR_IMAN: u64 = 0x00; // Interrupter Management (bit0 IP RW1C, bit1 IE)
 const IR_ERSTSZ: u64 = 0x08; // Event Ring Segment Table Size
 const IR_ERSTBA: u64 = 0x10; // Event Ring Segment Table Base Address (64-bit)
 const IR_ERDP: u64 = 0x18; // Event Ring Dequeue Pointer (64-bit)
+
+const IMAN_IP: u32 = 1 << 0; // Interrupt Pending (RW1C)
+const IMAN_IE: u32 = 1 << 1; // Interrupt Enable
+const ERDP_EHB: u64 = 1 << 3; // Event Handler Busy (write 1 to clear when advancing ERDP)
 
 /// Entries in the command / event rings (TRBs are 16 bytes → 256 fit in one 4 KiB page).
 const RING_TRBS: u32 = 256;
@@ -171,7 +178,7 @@ impl Xhci {
                     self.event_cycle ^= 1;
                 }
                 let erdp = self.event_ring_phys + (self.event_dequeue * 16) as u64;
-                read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp);
+                read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp | ERDP_EHB);
                 return Some((trb_type, completion, slot));
             }
             for _ in 0..200 {
@@ -528,6 +535,66 @@ impl Xhci {
         }
     }
 
+    /// Enable interrupt-driven event delivery (WP-04 step 5) via **MSI-X** — the universal path for
+    /// PCIe devices (the message is a plain memory write to the local APIC, so it needs no ACPI
+    /// interrupt-routing tables). Programs MSI-X table entry 0 to target this CPU's local APIC at
+    /// `vector`, unmasks it, enables MSI-X in PCI config, then enables the controller's interrupter
+    /// (IMAN.IE) and the global interrupt enable (USBCMD.INTE). Returns true on success; on any
+    /// failure the driver keeps working via main-loop polling.
+    fn enable_msix(&mut self, io: &mut dyn DeviceIo, vector: u8) -> bool {
+        // Find our PCI device by matching its MMIO base to this controller's cap base.
+        let pd = match crate::pci::find_by_class_subclass(0x0C, 0x03)
+            .into_iter()
+            .find(|pd| pci_bar_base(pd, 0) == self.cap_base)
+        {
+            Some(pd) => pd,
+            None => {
+                crate::serial_println!("[XHCI] MSI-X: PCI device not found");
+                return false;
+            }
+        };
+        let msix = match crate::pci::find_capability(&pd, 0x11) {
+            Some(off) => off,
+            None => {
+                crate::serial_println!("[XHCI] MSI-X: capability absent");
+                return false;
+            }
+        };
+        let control = crate::pci::config_read16(&pd, msix + 2);
+        let table_info = crate::pci::config_read32(&pd, msix + 4);
+        let bir = (table_info & 0x7) as u8;
+        let table_off = (table_info & !0x7) as u64;
+        let table = pci_bar_base(&pd, bir) + table_off;
+
+        // MSI-X table entry 0: message address = 0xFEE0_0000 | (apic_id << 12) (Fixed delivery to
+        // this CPU), message data = vector, vector control bit 0 = 0 (unmasked).
+        let apic_id = crate::apic::local_apic_id();
+        io.mmio_write32(table, 0xFEE0_0000 | (apic_id << 12));
+        io.mmio_write32(table + 4, 0);
+        io.mmio_write32(table + 8, vector as u32);
+        io.mmio_write32(table + 12, 0);
+
+        // Enable MSI-X (control bit 15), clear the global function mask (bit 14).
+        crate::pci::config_write16(&pd, msix + 2, (control | (1 << 15)) & !(1 << 14));
+
+        // Clear any interrupt state left set by the events consumed during enumeration, so the next
+        // event is a fresh 0→1 pending transition (MSI is edge-triggered). USBSTS.EINT and IMAN.IP
+        // are both RW1C. Then enable interrupter 0 (IE) and the global interrupt enable.
+        io.mmio_write32(self.op_base + OP_USBSTS, USBSTS_EINT);
+        io.mmio_write32(self.runtime_base + IR0 + IR_IMAN, IMAN_IP | IMAN_IE);
+        let cmd = io.mmio_read32(self.op_base + OP_USBCMD);
+        io.mmio_write32(self.op_base + OP_USBCMD, cmd | USBCMD_INTE);
+
+        // Publish the register bases so the bare ISR can acknowledge without taking the lock.
+        XHCI_OP_BASE.store(self.op_base, core::sync::atomic::Ordering::SeqCst);
+        XHCI_RUNTIME_BASE.store(self.runtime_base, core::sync::atomic::Ordering::SeqCst);
+        crate::serial_println!(
+            "[XHCI] MSI-X enabled: table @ {:#x} (BIR {}), vector {:#x}, apic {}",
+            table, bir, vector, apic_id
+        );
+        true
+    }
+
     /// Non-blocking check of the event ring: return the next event if its cycle bit is current, else
     /// `None`. Returns `(trb_type, completion_code, slot_id, endpoint_id)`. Advances the dequeue
     /// pointer + ERDP like [`poll_event`] but without spinning.
@@ -548,7 +615,7 @@ impl Xhci {
             self.event_cycle ^= 1;
         }
         let erdp = self.event_ring_phys + (self.event_dequeue as u64 * 16);
-        read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp);
+        read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp | ERDP_EHB);
         Some((trb_type, completion, slot, endpoint))
     }
 
@@ -813,13 +880,61 @@ fn parse_hid_interface(base: u64, len: u64) -> Option<HidInterface> {
 /// The (single) xHCI controller, populated on successful bring-up.
 pub static CONTROLLER: Mutex<Option<Xhci>> = Mutex::new(None);
 
-/// Poll the xHCI's configured HID endpoint for input (WP-04 step 4b). Called from the kernel main
-/// loop until interrupt-driven delivery lands (step 5). No-op if no controller/HID device is up.
-/// Uses `try_lock` so it never blocks the main loop if the controller mutex is momentarily held.
+/// Register bases published for the interrupt handler so it can acknowledge the controller without
+/// taking the `CONTROLLER` lock (0 = interrupts not yet enabled).
+static XHCI_OP_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static XHCI_RUNTIME_BASE: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Count of serviced xHCI interrupts (diagnostic / proof the IRQ path is live).
+pub static IRQ_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Compute the base address of PCI BAR `index` for `pd`, combining the high dword for 64-bit memory
+/// BARs (as [`crate::device::pci_resources`] does for BAR0).
+fn pci_bar_base(pd: &crate::pci::PciDevice, index: u8) -> u64 {
+    let off = 0x10 + index * 4;
+    let lo = crate::pci::config_read32(pd, off);
+    if lo & 1 == 0 {
+        let base = (lo & !0xF) as u64;
+        if (lo >> 1) & 0b11 == 0b10 {
+            let hi = crate::pci::config_read32(pd, off + 4);
+            return ((hi as u64) << 32) | base;
+        }
+        base
+    } else {
+        (lo & !0x3) as u64
+    }
+}
+
+/// Poll the xHCI's configured HID endpoints for input (WP-04 step 4b). Called from the kernel main
+/// loop; also the initial-queue path even when interrupts are enabled. No-op if no controller/HID
+/// device is up. Uses `try_lock` so it never blocks the main loop.
 pub fn poll() {
     if let Some(mut guard) = CONTROLLER.try_lock() {
         if let Some(ctrl) = guard.as_mut() {
             let mut io = crate::device::kernel_io();
+            ctrl.poll_hid(&mut io);
+        }
+    }
+}
+
+/// xHCI interrupt service routine body (WP-04 step 5), called from the IDT stub. Acknowledges the
+/// controller (clear USBSTS.EINT + IMAN.IP) using the published register bases — this happens
+/// unconditionally so the interrupt always deasserts and can't storm — then drains the event ring
+/// and re-queues reports if the controller lock is free (otherwise the main-loop `poll` will).
+pub fn on_interrupt() {
+    let op = XHCI_OP_BASE.load(core::sync::atomic::Ordering::SeqCst);
+    let rt = XHCI_RUNTIME_BASE.load(core::sync::atomic::Ordering::SeqCst);
+    if op == 0 {
+        return;
+    }
+    IRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let mut io = crate::device::kernel_io();
+    // Acknowledge: clear the event-interrupt (USBSTS.EINT) and the interrupter pending bit
+    // (IMAN.IP), keeping IMAN.IE set. Both are RW1C.
+    io.mmio_write32(op + OP_USBSTS, USBSTS_EINT);
+    io.mmio_write32(rt + IR0 + IR_IMAN, IMAN_IP | IMAN_IE);
+    // Drain + re-queue if we can grab the lock without blocking the ISR.
+    if let Some(mut guard) = CONTROLLER.try_lock() {
+        if let Some(ctrl) = guard.as_mut() {
             ctrl.poll_hid(&mut io);
         }
     }
@@ -1050,6 +1165,10 @@ impl Driver for XhciDriver {
                     ctrl.enumerate_port(port, speed, io);
                 }
                 crate::serial_println!("[XHCI] {} HID device(s) ready", ctrl.hid_devices.len());
+                // Step 5: switch input from main-loop polling to interrupt-driven via MSI-X.
+                if !ctrl.hid_devices.is_empty() {
+                    ctrl.enable_msix(io, crate::interrupts::XHCI_VECTOR);
+                }
                 *CONTROLLER.lock() = Some(ctrl);
                 Ok(())
             }

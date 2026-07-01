@@ -98,6 +98,16 @@ pub fn enable_local_apic(local_apic_phys: u64) {
     );
 }
 
+/// The local APIC id of the current (boot) processor, read from the APIC ID register. Used as the
+/// destination for MSI/MSI-X messages so they land on this CPU — read from hardware, not assumed.
+pub fn local_apic_id() -> u32 {
+    let base = LOCAL_APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed);
+    if base == 0 {
+        return 0;
+    }
+    lapic_read(base, lapic_reg::ID) >> 24
+}
+
 /// Signal end-of-interrupt to the local APIC (for APIC-delivered interrupts, e.g. the APIC timer).
 pub fn eoi() {
     let base = LOCAL_APIC_BASE_VIRT.load(core::sync::atomic::Ordering::Relaxed);
