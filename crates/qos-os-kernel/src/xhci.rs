@@ -56,8 +56,88 @@ pub struct Xhci {
     pub doorbell_base: u64,
     pub max_slots: u32,
     pub cmd_ring_phys: u64,
+    pub cmd_ring_virt: u64,
     pub event_ring_phys: u64,
+    pub event_ring_virt: u64,
     pub dcbaa_phys: u64,
+    // Command-ring producer state and event-ring consumer state (with their cycle bits).
+    pub cmd_enqueue: usize,
+    pub cmd_cycle: u32,
+    pub event_dequeue: usize,
+    pub event_cycle: u32,
+}
+
+/// TRB types we use.
+const TRB_ENABLE_SLOT: u32 = 9;
+const TRB_COMMAND_COMPLETION: u32 = 33;
+
+impl Xhci {
+    /// Enqueue a command TRB (4 dwords; the cycle bit is OR'd into dword3) and ring the command
+    /// doorbell. Single-command use — does not yet handle ring wrap / Link TRBs.
+    fn submit_command(&mut self, d0: u32, d1: u32, d2: u32, d3_type: u32, io: &mut dyn DeviceIo) {
+        let trb = self.cmd_ring_virt + (self.cmd_enqueue * 16) as u64;
+        unsafe {
+            core::ptr::write_volatile(trb as *mut u32, d0);
+            core::ptr::write_volatile((trb + 4) as *mut u32, d1);
+            core::ptr::write_volatile((trb + 8) as *mut u32, d2);
+            core::ptr::write_volatile((trb + 12) as *mut u32, (d3_type << 10) | self.cmd_cycle);
+        }
+        self.cmd_enqueue += 1;
+        io.mmio_write32(self.doorbell_base, 0); // doorbell 0, DB target 0 = command ring
+    }
+
+    /// Poll the event ring for the next event; return `(trb_type, completion_code, slot_id)` or
+    /// `None` on timeout. Advances the dequeue pointer and updates ERDP.
+    fn poll_event(&mut self, io: &mut dyn DeviceIo) -> Option<(u32, u32, u32)> {
+        for _ in 0..200_000 {
+            let evt = self.event_ring_virt + (self.event_dequeue * 16) as u64;
+            let d3 = unsafe { core::ptr::read_volatile((evt + 12) as *const u32) };
+            if (d3 & 1) == self.event_cycle {
+                let d2 = unsafe { core::ptr::read_volatile((evt + 8) as *const u32) };
+                let trb_type = (d3 >> 10) & 0x3F;
+                let completion = (d2 >> 24) & 0xFF;
+                let slot = (d3 >> 24) & 0xFF;
+                self.event_dequeue += 1;
+                if self.event_dequeue >= RING_TRBS as usize {
+                    self.event_dequeue = 0;
+                    self.event_cycle ^= 1;
+                }
+                let erdp = self.event_ring_phys + (self.event_dequeue * 16) as u64;
+                read64_lo_hi_write(io, self.runtime_base + IR0 + IR_ERDP, erdp);
+                return Some((trb_type, completion, slot));
+            }
+            for _ in 0..200 {
+                core::hint::spin_loop();
+            }
+        }
+        None
+    }
+
+    /// Send an Enable Slot command and return the assigned slot id (WP-04 step 3b-2). Proves the
+    /// command ring, doorbell, and event ring all work end-to-end. The port resets done earlier
+    /// leave Port Status Change Events (type 34) queued ahead of our Command Completion Event
+    /// (type 33), so we drain intervening events until the completion arrives.
+    fn enable_slot(&mut self, io: &mut dyn DeviceIo) -> Option<u32> {
+        self.submit_command(0, 0, 0, TRB_ENABLE_SLOT, io);
+        for _ in 0..32 {
+            match self.poll_event(io) {
+                Some((TRB_COMMAND_COMPLETION, cc, slot)) => {
+                    if cc == 1 {
+                        return Some(slot);
+                    }
+                    crate::serial_println!("[XHCI] enable-slot completion code {}", cc);
+                    return None;
+                }
+                // Drain port-status-change (34) and any other non-completion events.
+                Some(_) => continue,
+                None => {
+                    crate::serial_println!("[XHCI] enable-slot: no completion event (timeout)");
+                    return None;
+                }
+            }
+        }
+        None
+    }
 }
 
 /// The (single) xHCI controller, populated on successful bring-up.
@@ -127,11 +207,11 @@ fn bring_up(cap_base: u64, io: &mut dyn DeviceIo) -> Result<Xhci, &'static str> 
     read64_lo_hi_write(io, op_base + OP_DCBAAP, dcbaa_phys);
 
     // Command Ring (one page of TRBs). Program CRCR with the ring base + Ring Cycle State = 1.
-    let (cmd_ring_phys, _) = alloc_dma_page().ok_or("no frame for command ring")?;
+    let (cmd_ring_phys, cmd_ring_virt) = alloc_dma_page().ok_or("no frame for command ring")?;
     read64_lo_hi_write(io, op_base + OP_CRCR, cmd_ring_phys | 1);
 
     // Event Ring: one segment (a page of TRBs) described by a one-entry Event Ring Segment Table.
-    let (event_ring_phys, _) = alloc_dma_page().ok_or("no frame for event ring")?;
+    let (event_ring_phys, event_ring_virt) = alloc_dma_page().ok_or("no frame for event ring")?;
     let (erst_phys, erst_virt) = alloc_dma_page().ok_or("no frame for ERST")?;
     unsafe {
         // ERST entry 0: ring segment base address (64-bit) then ring segment size (u16 in u32).
@@ -157,8 +237,14 @@ fn bring_up(cap_base: u64, io: &mut dyn DeviceIo) -> Result<Xhci, &'static str> 
         doorbell_base,
         max_slots,
         cmd_ring_phys,
+        cmd_ring_virt,
         event_ring_phys,
+        event_ring_virt,
         dcbaa_phys,
+        cmd_enqueue: 0,
+        cmd_cycle: 1,
+        event_dequeue: 0,
+        event_cycle: 1,
     })
 }
 
@@ -257,13 +343,20 @@ impl Driver for XhciDriver {
 
         // Step 2: bring the controller up.
         match bring_up(base, io) {
-            Ok(ctrl) => {
+            Ok(mut ctrl) => {
                 crate::serial_println!(
                     "[XHCI] running: op={:#x} runtime={:#x} doorbell={:#x} slots_enabled={}",
                     ctrl.op_base, ctrl.runtime_base, ctrl.doorbell_base, ctrl.max_slots
                 );
-                // Step 3a: see which root-hub ports have a device attached.
-                scan_ports(ctrl.op_base, max_ports, io);
+                // Step 3a: reset connected ports so they enable.
+                let enabled = scan_ports(ctrl.op_base, max_ports, io);
+                // Step 3b-2: prove the command/event-ring machinery by requesting a device slot.
+                if enabled > 0 {
+                    match ctrl.enable_slot(io) {
+                        Some(slot) => crate::serial_println!("[XHCI] Enable Slot -> slot id {}", slot),
+                        None => crate::serial_println!("[XHCI] Enable Slot failed"),
+                    }
+                }
                 *CONTROLLER.lock() = Some(ctrl);
                 Ok(())
             }
