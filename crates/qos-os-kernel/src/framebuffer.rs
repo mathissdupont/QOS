@@ -263,7 +263,9 @@ pub fn draw_char(x: usize, y: usize, ch: char, fg: u32, bg: u32) {
     for row in 0..8 {
         let bitmap = FONT_8X8[ch][row];
         for col in 0..8 {
-            let pixel = if (bitmap & (1 << (7 - col))) != 0 {
+            // The font data is LSB-first (bit 0 = leftmost pixel). Using bit `col` (not `7-col`)
+            // avoids rendering every glyph horizontally mirrored.
+            let pixel = if (bitmap & (1 << col)) != 0 {
                 fg
             } else {
                 bg

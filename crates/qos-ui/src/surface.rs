@@ -30,17 +30,34 @@ pub struct Surface {
     pub width: usize,
     pub height: usize,
     pub pixels: Vec<Rgb>,
+    /// Optional clip rectangle: all drawing is confined to it (intersected with the bounds). Lets
+    /// callers recompose only a damaged sub-region (e.g. during a window drag) instead of the whole
+    /// surface. `None` = draw to the full surface.
+    clip_rect: Option<Rect>,
 }
 
 impl Surface {
     /// A black surface of the given size.
     pub fn new(width: usize, height: usize) -> Self {
-        Surface { width, height, pixels: vec![0; width * height] }
+        Surface { width, height, pixels: vec![0; width * height], clip_rect: None }
     }
 
     /// A surface filled with `color`.
     pub fn filled(width: usize, height: usize, color: Rgb) -> Self {
-        Surface { width, height, pixels: vec![color; width * height] }
+        Surface { width, height, pixels: vec![color; width * height], clip_rect: None }
+    }
+
+    /// Confine subsequent drawing to `r` (intersected with the surface); `None` clears the clip.
+    pub fn set_clip(&mut self, r: Option<Rect>) {
+        self.clip_rect = r;
+    }
+
+    #[inline]
+    fn in_clip(&self, x: i32, y: i32) -> bool {
+        match self.clip_rect {
+            Some(c) => c.contains(x, y),
+            None => true,
+        }
     }
 
     #[inline]
@@ -53,18 +70,18 @@ impl Surface {
         self.pixels[y * self.width + x]
     }
 
-    /// Write one pixel, ignoring out-of-bounds coordinates.
+    /// Write one pixel, ignoring out-of-bounds / out-of-clip coordinates.
     #[inline]
     pub fn put(&mut self, x: i32, y: i32, color: Rgb) {
-        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height {
+        if x >= 0 && y >= 0 && (x as usize) < self.width && (y as usize) < self.height && self.in_clip(x, y) {
             self.pixels[y as usize * self.width + x as usize] = color;
         }
     }
 
-    /// Alpha-blend one pixel (`alpha` 0..=255), ignoring out-of-bounds coordinates.
+    /// Alpha-blend one pixel (`alpha` 0..=255), ignoring out-of-bounds / out-of-clip coordinates.
     #[inline]
     pub fn blend(&mut self, x: i32, y: i32, color: Rgb, alpha: u8) {
-        if alpha == 0 || x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height {
+        if alpha == 0 || x < 0 || y < 0 || x as usize >= self.width || y as usize >= self.height || !self.in_clip(x, y) {
             return;
         }
         let idx = y as usize * self.width + x as usize;
@@ -78,9 +95,13 @@ impl Surface {
         }
     }
 
-    /// Clip a rectangle to the surface, returning integer pixel ranges `(x0, y0, x1, y1)`.
+    /// Clip a rectangle to the surface (and the active clip rect), returning integer pixel ranges
+    /// `(x0, y0, x1, y1)`.
     fn clip(&self, r: &Rect) -> Option<(usize, usize, usize, usize)> {
-        let c = r.intersect(&self.bounds())?;
+        let mut c = r.intersect(&self.bounds())?;
+        if let Some(cr) = self.clip_rect {
+            c = c.intersect(&cr)?;
+        }
         Some((c.x as usize, c.y as usize, c.right() as usize, c.bottom() as usize))
     }
 

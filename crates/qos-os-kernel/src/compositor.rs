@@ -443,6 +443,54 @@ pub fn run_splash() {
 /// the right card → shell (`false`); `Esc` → shell. If nothing is pressed it defaults to the
 /// desktop after a short countdown, so the UI comes up on its own. No-op → `true` without a
 /// framebuffer.
+/// Draw the boot-chooser scene (no cursor) into `s`: gradient, logo, title, the two cards, and the
+/// countdown. Factored out so the loop can redraw it only when the countdown ticks, using cheap
+/// cursor save-under for mouse movement in between.
+fn draw_chooser_scene(
+    s: &mut Surface,
+    fr: &mut FontRenderer,
+    theme: &Theme,
+    wi: i32,
+    hi: i32,
+    desktop_card: Rect,
+    shell_card: Rect,
+    card_w: i32,
+    sec: i32,
+) {
+    s.gradient_v(Rect::new(0, 0, wi, hi), theme.wallpaper_top, theme.wallpaper_bottom);
+    let logo = 150;
+    s.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, Rect::new(wi / 2 - logo / 2, hi / 6, logo, logo), theme.text, 255);
+    let title = "Welcome to QOS";
+    let tw = fr.text_width(title, 34.0);
+    fr.draw_text(s, wi / 2 - tw / 2, hi / 6 + logo + 40, title, 34.0, theme.text);
+    let sub = "Choose how to start";
+    let sw = fr.text_width(sub, 17.0);
+    fr.draw_text(s, wi / 2 - sw / 2, hi / 6 + logo + 72, sub, 17.0, theme.text_dim);
+
+    s.drop_shadow(desktop_card, 16, 18, theme.shadow, 130);
+    s.rounded_rect(desktop_card, 16, theme.accent);
+    let d1 = "Modern Desktop";
+    let d1w = fr.text_width(d1, 22.0);
+    fr.draw_text(s, desktop_card.x + (card_w - d1w) / 2, desktop_card.y + 88, d1, 22.0, theme.on_accent);
+    let d2 = "Enter  /  D";
+    let d2w = fr.text_width(d2, 15.0);
+    fr.draw_text(s, desktop_card.x + (card_w - d2w) / 2, desktop_card.y + 130, d2, 15.0, theme.on_accent);
+
+    s.drop_shadow(shell_card, 16, 18, theme.shadow, 100);
+    s.rounded_rect(shell_card, 16, theme.surface);
+    let s1 = "Terminal";
+    let s1w = fr.text_width(s1, 22.0);
+    fr.draw_text(s, shell_card.x + (card_w - s1w) / 2, shell_card.y + 88, s1, 22.0, theme.text);
+    let s2 = "S";
+    let s2w = fr.text_width(s2, 15.0);
+    fr.draw_text(s, shell_card.x + (card_w - s2w) / 2, shell_card.y + 130, s2, 15.0, theme.text_dim);
+
+    let mut buf = [0u8; 48];
+    let hint = fmt_countdown(&mut buf, sec.max(0));
+    let hw = fr.text_width(hint, 14.0);
+    fr.draw_text(s, wi / 2 - hw / 2, shell_card.bottom() + 44, hint, 14.0, theme.text_dim);
+}
+
 pub fn boot_choice() -> bool {
     let info = match crate::framebuffer::info() {
         Some(i) => i,
@@ -473,7 +521,14 @@ pub fn boot_choice() -> bool {
     }
     let start = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
     let mut cursor = (wi / 2, hi / 2);
-    let mut last_sec = -1;
+    let mut last_cursor = cursor;
+
+    // Compose + blit the scene once, then overlay the cursor.
+    let first_sec = TIMEOUT / 100;
+    draw_chooser_scene(&mut surface, &mut fr, &theme, wi, hi, desktop_card, shell_card, card_w, first_sec);
+    crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+    draw_cursor_fb(cursor.0, cursor.1);
+    let mut last_sec = first_sec;
 
     loop {
         crate::xhci::poll();
@@ -487,7 +542,6 @@ pub fn boot_choice() -> bool {
                 crate::input::InputEvent::MouseMove { dx, dy } => {
                     cursor.0 = (cursor.0 + dx as i32).clamp(0, wi - 1);
                     cursor.1 = (cursor.1 - dy as i32).clamp(0, hi - 1);
-                    last_sec = -1; // force redraw so the cursor moves
                 }
                 crate::input::InputEvent::MouseButton { button: crate::input::MouseButton::Left, pressed: true } => {
                     if desktop_card.contains(cursor.0, cursor.1) {
@@ -506,55 +560,17 @@ pub fn boot_choice() -> bool {
         }
         let sec = (TIMEOUT - elapsed) / 100;
         if sec != last_sec {
-            // Redraw the chooser (background, logo, title, two cards, countdown, cursor).
-            surface.gradient_v(Rect::new(0, 0, wi, hi), theme.wallpaper_top, theme.wallpaper_bottom);
-            let logo = 150;
-            surface.blit_mask_scaled(LOGO_MASK, LOGO_W, LOGO_H, Rect::new(wi / 2 - logo / 2, hi / 6, logo, logo), theme.text, 255);
-            let title = "Welcome to QOS";
-            let tw = fr.text_width(title, 34.0);
-            fr.draw_text(&mut surface, wi / 2 - tw / 2, hi / 6 + logo + 40, title, 34.0, theme.text);
-            let sub = "Choose how to start";
-            let sw = fr.text_width(sub, 17.0);
-            fr.draw_text(&mut surface, wi / 2 - sw / 2, hi / 6 + logo + 72, sub, 17.0, theme.text_dim);
-
-            // Desktop card (accent) + Shell card (surface).
-            surface.drop_shadow(desktop_card, 16, 18, theme.shadow, 130);
-            surface.rounded_rect(desktop_card, 16, theme.accent);
-            let d1 = "Modern Desktop";
-            let d1w = fr.text_width(d1, 22.0);
-            fr.draw_text(&mut surface, desktop_card.x + (card_w - d1w) / 2, desktop_card.y + 88, d1, 22.0, theme.on_accent);
-            let d2 = "Enter  /  D";
-            let d2w = fr.text_width(d2, 15.0);
-            fr.draw_text(&mut surface, desktop_card.x + (card_w - d2w) / 2, desktop_card.y + 130, d2, 15.0, theme.on_accent);
-
-            surface.drop_shadow(shell_card, 16, 18, theme.shadow, 100);
-            surface.rounded_rect(shell_card, 16, theme.surface);
-            let s1 = "Terminal";
-            let s1w = fr.text_width(s1, 22.0);
-            fr.draw_text(&mut surface, shell_card.x + (card_w - s1w) / 2, shell_card.y + 88, s1, 22.0, theme.text);
-            let s2 = "S";
-            let s2w = fr.text_width(s2, 15.0);
-            fr.draw_text(&mut surface, shell_card.x + (card_w - s2w) / 2, shell_card.y + 130, s2, 15.0, theme.text_dim);
-
-            // Countdown hint.
-            let mut buf = [0u8; 48];
-            let hint = fmt_countdown(&mut buf, sec.max(0));
-            let hw = fr.text_width(hint, 14.0);
-            fr.draw_text(&mut surface, wi / 2 - hw / 2, shell_card.bottom() + 44, hint, 14.0, theme.text_dim);
-
-            // Cursor.
-            for (row, line) in CURSOR.iter().enumerate() {
-                for (col, ch) in line.bytes().enumerate() {
-                    let color = match ch {
-                        b'#' => qos_ui::rgb(0x10, 0x12, 0x18),
-                        b'o' => qos_ui::rgb(0xff, 0xff, 0xff),
-                        _ => continue,
-                    };
-                    surface.put(cursor.0 + col as i32, cursor.1 + row as i32, color);
-                }
-            }
+            // Countdown ticked: recompose the scene (full) and redraw the cursor on top.
+            draw_chooser_scene(&mut surface, &mut fr, &theme, wi, hi, desktop_card, shell_card, card_w, sec);
             crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
+            last_cursor = cursor;
+            draw_cursor_fb(last_cursor.0, last_cursor.1);
             last_sec = sec;
+        } else if cursor != last_cursor {
+            // Cursor-only move: cheap save-under, no full recompose.
+            crate::framebuffer::blit_region(&surface.pixels, w, last_cursor.0 as usize, last_cursor.1 as usize, CURSOR_W, CURSOR_H);
+            last_cursor = cursor;
+            draw_cursor_fb(last_cursor.0, last_cursor.1);
         }
         crate::arch::hlt();
     }
@@ -665,17 +681,21 @@ pub fn run_demo() {
             }
         }
         if desk.dirty {
-            // Scene changed: recompose the surface (RAM), then blit only what changed to the (slow)
-            // framebuffer — the whole screen for z-order/theme/open/close, or just the damage rect
-            // (union of old+new window footprints, plus the cursor's old+new spots) for a drag.
-            desk.compose(&mut surface, &mut fr);
+            // Scene changed. For a drag, confine BOTH the recompose (RAM) and the blit (slow
+            // framebuffer MMIO) to the damage rect — the union of old+new window footprints plus
+            // the cursor's old+new spots. Full screen only for z-order/theme/open/close.
             if desk.full {
+                surface.set_clip(None);
+                desk.compose(&mut surface, &mut fr);
                 crate::framebuffer::blit_region(&surface.pixels, w, 0, 0, w, h);
             } else {
                 let cur_old = Rect::new(last_cursor.0, last_cursor.1, CURSOR_W as i32, CURSOR_H as i32);
                 let cur_new = Rect::new(desk.cursor.0, desk.cursor.1, CURSOR_W as i32, CURSOR_H as i32);
                 let region = desk.damage.union(&cur_old).union(&cur_new);
                 if let Some(r) = region.intersect(&Rect::new(0, 0, w as i32, h as i32)) {
+                    surface.set_clip(Some(r));
+                    desk.compose(&mut surface, &mut fr);
+                    surface.set_clip(None);
                     crate::framebuffer::blit_region(&surface.pixels, w, r.x as usize, r.y as usize, r.w as usize, r.h as usize);
                 }
             }
