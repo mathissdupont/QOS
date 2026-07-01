@@ -59,8 +59,11 @@ Each epic lists its rough size and key dependencies. IDs (E-xx) are for cross-re
   decoupled from the PIT.
 
 ### P1 — Platform modernization (ADR-0015)
-- **E-10 ACPI + APIC** (M). RSDP→MADT/FADT parse; local APIC + IO-APIC; APIC timer; PIC fallback.
-  *Dependency root for USB, SMP, MSI.*
+- **E-10 ACPI + APIC** (M). ✅ **Done.** RSDP (from bootloader) → XSDT → MADT parse (host-tested
+  `qos-acpi`); local APIC enabled; scheduler tick moved to the local-APIC timer (calibrated);
+  keyboard/mouse routed through the IO-APIC; the 8259 PIC/PIT are fully masked. Verified in
+  QEMU+OVMF (q35) end-to-end. *Dependency root for USB, SMP, MSI — now unblocked.* (FADT-based
+  shutdown/reboot from the legacy `acpi.rs` is a separate follow-up.)
 - **E-11 SMP / multi-core** (L). AP bring-up (INIT/SIPI), per-CPU state, multi-core scheduler,
   IPIs, SMP-safe kernel. Depends on E-10, E-02.
 - **E-12 PCIe + MSI/MSI-X** (M). ECAM config space, capability parsing, MSI interrupts. Depends
