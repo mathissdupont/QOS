@@ -1,3 +1,7 @@
+> **Superseded (2026-07-01):** the authoritative long-range plan is now
+> [docs/MASTERPLAN.md](docs/MASTERPLAN.md). This file is kept for historical context
+> (the LLVM/Docker bring-up era).
+
 # QaOS Roadmap & Known Issues
 
 ## ✅ SOLVED: LLVM Alignment Issue (Docker Solution)
