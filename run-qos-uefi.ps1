@@ -96,9 +96,10 @@ $qargs = @(
 )
 
 if ($Fast) {
-    # Windows Hypervisor Platform: hardware-accelerated, far smoother than TCG emulation.
-    $qargs = @('-accel', 'whpx,kernel-irqchip=off') + $qargs
-    Write-Host '  Accelerator: WHPX (hardware). If QEMU errors, re-run without -Fast.' -ForegroundColor Cyan
+    # NOTE: the Windows Hypervisor Platform (WHPX) accelerator proved unreliable with this guest
+    # (it could hang QEMU before the kernel ran). It is intentionally NOT enabled; -Fast is kept
+    # only so older instructions don't error. Software emulation (TCG) is the supported path.
+    Write-Host '  (-Fast is a no-op: WHPX is disabled for reliability; using TCG.)' -ForegroundColor Yellow
 }
 
 Write-Host ''
@@ -116,14 +117,7 @@ if ($Serial) {
     $log = Join-Path $work 'qos-serial.log'
     Remove-Item $log -ErrorAction SilentlyContinue
     $qargs += @('-serial', "file:$log")
-    $p = Start-Process -FilePath $qemu -ArgumentList $qargs -PassThru
+    Start-Process -FilePath $qemu -ArgumentList $qargs
     Start-Sleep -Seconds 3
-    if ($Fast -and $p.HasExited -and $p.ExitCode -ne 0) {
-        # WHPX unavailable/rejected — retry without acceleration so the user still gets a window.
-        Write-Host 'WHPX unavailable; retrying without acceleration...' -ForegroundColor Yellow
-        $qargs = $qargs | Where-Object { $_ -ne 'whpx,kernel-irqchip=off' -and $_ -ne '-accel' }
-        Start-Process -FilePath $qemu -ArgumentList $qargs
-        Start-Sleep -Seconds 3
-    }
     Write-Host "Serial log: $log"
 }
