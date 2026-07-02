@@ -1,9 +1,10 @@
-# WP-06: Quantum control plane — serious engine + visual lab
+# WP-06: Quantum control plane — serious engine + visual lab + QASM toolchain
 
 - Status: 🟡 in progress
 - Epic: E-80 (quantum control plane)
-- ADRs: ADR-0019 (in-place statevector engine), ADR-0020 (CPU hardening — shipped together)
-- Commits: d7f273c (engine + editor + hardening)
+- ADRs: ADR-0019 (in-place statevector engine), ADR-0020 (CPU hardening — shipped together),
+  ADR-0021 (in-OS QASM toolchain)
+- Commits: d7f273c (engine + editor + hardening), a0f03e9 (QASM Studio + transpile + bridges)
 
 ## Goal
 
@@ -30,10 +31,20 @@ bars: security, performance, UX/UI quality (user directive 2026-07-02).
 - [x] **Verification (QEMU, 0-fault).** GHZ run → `000: 529 / 111: 471`; placing RX(π/2) on q0
   via keyboard → the physically exact 4-way split (`000/100/011/111` ≈ 250 each). Serial shows
   `[SEC] hardening: NX on WP on ...` (ADR-0020 landed in the same slice).
-- [ ] **Next:** QASM export/import from the editor (save circuits as files → edit in Text
-  Editor → run from Terminal); controlled rotations (CRZ/CP) + more presets; measurement/reset
-  in the editor; noise models; QHAL backend abstraction + transpile (MASTERPLAN E-80); Terminal
-  `qasm <file>` command.
+- [x] **QASM toolchain (ADR-0021).** **QASM Studio** (10th app): source editor with keyword
+  tinting, Compile (F4) → parse/validate + transpile stats or error, Run (F5) → optimized
+  execution + inline histogram, Save (F2) → fs/`disk:`. **`quantum::transpile`**: self-inverse
+  pair cancellation (overlap-aware, fixpoint) + circuit-depth analysis, shared by Studio and the
+  Terminal's new **`qasm <file> [shots]`** command. **Bridges:** Quantum Lab exports its visual
+  circuit as OpenQASM into the Studio (QASM button / `e`); Files opens `.qasm` in the Studio by
+  extension. UX: **F10 closes the focused window from any app** (keyboard-escape invariant);
+  number keys 1–9,0 open all ten apps. Verified in QEMU (0-fault, screenshots): F4/F5/F2 loop
+  (Bell 505/495; `draft.qasm` 102 B saved), Lab→Studio GHZ export, Terminal
+  `qasm quantum/bell.qasm` → "2 -> 2 gates (0 cancelled), depth 2" + 529/471.
+- [ ] **Next:** parser line numbers for compile errors; rotation-merge pass (RZ·RZ→RZ); QASM
+  import into the visual Lab (code → circuit); controlled rotations (CRZ/CP); measurement/reset
+  in the editor; a real text-editing core (cursor/selection) shared by Studio + Text Editor;
+  noise models; QHAL backend abstraction (MASTERPLAN E-80).
 
 ## Acceptance criteria
 
