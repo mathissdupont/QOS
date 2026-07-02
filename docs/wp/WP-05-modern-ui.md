@@ -93,11 +93,19 @@ host-tested.
     with a working directory, a `.`/`..`/absolute-path `resolve()`, and a cwd-aware prompt (plus the
     existing quantum `bell`/`ghz`/`qrng`). Verified in QEMU (0-fault): `write a.txt hello world` →
     `ls` shows it → `cat` prints it back; `cd` validates the target.
-  - [ ] **Next (step 5 cont.):** attach a real **persistent data disk** to QEMU + make **Files/shell
-    browse real ATA/diskfs** (the "hard disk" — `ata`/`diskfs` exist; QEMU q35 needs an IDE/AHCI
-    wiring decision since the PIO driver targets legacy ports 0x1F0); more apps (calculator,
-    devices/network panel, process viewer); deepen the quantum layer (visual circuit editor,
-    RX/RY/RZ, histogram — MASTERPLAN E-80).
+  - **Persistent storage (ADR-0018).** A real **AHCI/SATA DMA driver** (`ahci.rs`): PCI discovery
+    (class 01:06:01), ABAR via BAR5 + phys-offset, GHC.AE, port scan, command list + Register-H2D
+    FIS + PRDT in DMA frames; IDENTIFY / READ DMA EXT / WRITE DMA EXT. Boot-volume protection:
+    LBA0 classification (QOSFS magic = data, 0x55AA = boot → skip, blank = data). `diskfs` (QOSFS)
+    now runs over AHCI; the launcher attaches a persistent 16 MiB SATA data disk on a dedicated
+    HBA. Terminal gained `disk`/`dformat`/`dls`/`dcat`/`dsave`/`dload`; the System Monitor Storage
+    row shows real capacity + format state. **Two-boot persistence verified in QEMU (0-fault):**
+    boot #1 `dformat` + `dsave note.txt`; boot #2 reports "QOSFS formatted", `dls` lists it, `dcat`
+    prints the exact contents — files survive reboots.
+  - [ ] **Next (step 5 cont.):** show the persistent disk inside the **Files app** (a "Disk"
+    location next to the RAM fs, or a VFS mount); more apps (calculator, devices/network panel,
+    process viewer); deepen the quantum layer (visual circuit editor, RX/RY/RZ, histogram —
+    MASTERPLAN E-80).
 
 ## Acceptance criteria
 
