@@ -53,16 +53,17 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
   Blocks cloud-QPU and secure egress. *(open)*
 - **G-08** No real-hardware validation yet (ADR-0014 Stage 4); everything is QEMU+OVMF verified.
   *(open)*
-- **G-09** The desktop runs as one **cooperative** kernel loop — a busy computation freezes
-  input/UI; no preemption. → WP-08 slice 1. *(open)*
+- **G-09** ~~The desktop runs as one cooperative kernel loop~~ → **resolved** by WP-08 slice 1
+  (43d10e0): the desktop runs with the preemptive scheduler armed; heavy quantum jobs execute on
+  a background kthread while the UI stays live. *(closed 2026-07-02)*
 - **G-10** No process isolation on the desktop path: every "app" shares kernel memory and can,
   by bug, corrupt any other. → WP-08 slice 3 (user-mode processes). *(open)*
 - **G-11** Windows cannot be resized by edge drag (only min/max); no notifications; no wallpaper
   options. → WP-05 next slices. *(open)*
-- **G-12** `ParseError` (QASM) carries no line/column — compile errors name the kind, not the
-  place. → WP-07 slice 2. *(open)*
-- **G-13** Editors were append/backspace-only (no cursor) — being fixed by WP-07 slice 1 for the
-  IDE; Text Editor adopts the shared core in WP-07 slice 3. *(in progress)*
+- **G-12** ~~`ParseError` carries no line~~ → **resolved** by WP-07 slice 2 (a0b3753): errors
+  carry their 1-based line; IDE problems row + red gutter + F8 jump. *(closed 2026-07-02)*
+- **G-13** ~~Editors were append/backspace-only~~ → **resolved** by WP-07 slices 1+3 (9125d8f):
+  shared `ed_*` cursor-editing core in both the IDE and the Text Editor. *(closed 2026-07-02)*
 - **G-14** Three disjoint filesystems + `disk:` special-casing in apps; no mount tree. → WP-09.
   *(open)*
 - **G-15** The NIC driver targets E1000 (8086:100e) but q35 exposes e1000e (8086:10d3) — no
