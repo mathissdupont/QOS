@@ -76,10 +76,24 @@ host-tested.
   Shared click geometry (`files_row_rect`/`qlab_btn_rect`/`settings_theme_rect`) drives draw +
   hit-test; `on_body_click` dispatches. **USB mouse fix:** `process_mouse_report` now diffs the
   button byte → real press AND release (fixed clicks + drag-release).
-  - [ ] **Next (step 5 cont.):** attach a real data disk to QEMU + make **Files browse real
-    ATA/FAT16** (the "hard disk"); a **Text Editor** (open/edit/save via `fs`/`vfs`); full file
-    manager ops (new/delete/rename/copy — all already in `fs`/`vfs`, just wire the UI); more apps
-    (calculator, devices/network panel, process viewer).
+  - **Text Editor (6th app, dock 'E').** Open a file from Files → its bytes load into an editable
+    buffer; keyboard edits it (chars / Backspace / Enter=newline); **Save** writes back via
+    `fs::write`; **New** clears the buffer. Scrolling text area with a block cursor + status line.
+  - **Files is now a real file manager.** A toolbar (**New File / New Dir / Rename / Delete /
+    Edit**) + selection highlight + status line + a centered **naming modal**. Every op calls the
+    real fs backend (`write`/`mkdir`/`rename`/`remove`) and refreshes the live listing. Also fully
+    **keyboard-driven** (`n`/`k`/`r`/`x`/`e`); the naming modal captures typing (Enter commits, Esc
+    cancels). Key routing precedence: naming modal → Terminal → Editor → desktop shortcuts; number
+    keys `1`–`6` open the six dock apps. New geometry helpers `files_tool_rect`/`files_name_box`/
+    `editor_btn_rect`. Verified in QEMU (0-fault, screenshots): keyboard New File → `hello.txt`,
+    New Dir → `docs/`, both appear in the refreshed, correctly-sorted listing; Editor renders +
+    accepts typing.
+  - [ ] **Next (step 5 cont.):** attach a real **persistent data disk** to QEMU + make **Files
+    browse real ATA/FAT16 or diskfs** (the "hard disk" — `ata`/`diskfs` exist; QEMU q35 needs an
+    IDE/AHCI wiring decision since the PIO driver targets legacy ports 0x1F0); add **fs commands to
+    the Terminal** (ls/cat/mkdir/rm/touch — makes it a real shell); more apps (calculator,
+    devices/network panel, process viewer); deepen the quantum layer (visual circuit editor,
+    RX/RY/RZ, histogram — MASTERPLAN E-80).
 
 ## Acceptance criteria
 
