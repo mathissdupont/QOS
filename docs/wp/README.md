@@ -23,6 +23,7 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | 🔴 not started |
 | [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | 🔴 not started |
 | [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | 🔴 not started |
+| [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | 🟡 in progress |
 
 Upcoming (not yet opened as WP files; see the master-plan critical path):
 PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · NVMe (E-23) · sound · power
