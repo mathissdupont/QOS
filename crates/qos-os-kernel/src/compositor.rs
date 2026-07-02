@@ -175,13 +175,52 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
 struct Terminal {
     lines: Vec<String>,
     input: String,
+    /// Working directory for the fs commands (empty = root), shared model with the Files app.
+    cwd: String,
 }
 
 impl Terminal {
     fn new() -> Self {
-        let mut t = Terminal { lines: Vec::new(), input: String::new() };
+        let mut t = Terminal { lines: Vec::new(), input: String::new(), cwd: String::new() };
         t.push("QOS Terminal — type 'help'.".to_string());
         t
+    }
+
+    /// Resolve `arg` against the terminal cwd into an absolute fs path (root-relative, no leading
+    /// '/'). `..` pops one segment; an empty/`.`/`/` arg is the cwd itself; a leading '/' is
+    /// treated as absolute.
+    fn resolve(&self, arg: &str) -> String {
+        let arg = arg.trim();
+        if arg.is_empty() || arg == "." {
+            return self.cwd.clone();
+        }
+        if arg == ".." {
+            return match self.cwd.rfind('/') {
+                Some(p) => self.cwd[..p].to_string(),
+                None => String::new(),
+            };
+        }
+        if let Some(stripped) = arg.strip_prefix('/') {
+            return stripped.trim_end_matches('/').to_string();
+        }
+        if self.cwd.is_empty() {
+            arg.to_string()
+        } else {
+            format!("{}/{}", self.cwd, arg)
+        }
+    }
+
+    /// Run a single-path fs op (mkdir/touch/rm): validate the arg, resolve it, call `f`, and return
+    /// a result line to print. Always returns `Some` (kept as `Option` for a uniform call site).
+    fn op(&self, rest: &str, usage: &str, f: impl Fn(&[u8]) -> Result<(), &'static str>) -> Option<String> {
+        if rest.trim().is_empty() {
+            return Some(usage.to_string());
+        }
+        let path = self.resolve(rest);
+        Some(match f(path.as_bytes()) {
+            Ok(()) => format!("ok: /{}", path),
+            Err(e) => format!("error: {}", e),
+        })
     }
 
     fn push(&mut self, s: String) {
@@ -201,9 +240,19 @@ impl Terminal {
         self.input.pop();
     }
 
+    /// The shell prompt, reflecting the current working directory.
+    fn prompt(&self) -> String {
+        if self.cwd.is_empty() {
+            "qos:/>".to_string()
+        } else {
+            format!("qos:/{}>", self.cwd)
+        }
+    }
+
     fn enter(&mut self) {
         let cmd = core::mem::take(&mut self.input);
-        self.push(format!("qos:\\> {}", cmd));
+        let p = self.prompt();
+        self.push(format!("{} {}", p, cmd));
         self.run(&cmd);
     }
 
@@ -219,7 +268,14 @@ impl Terminal {
             "help" => {
                 for l in [
                     "commands:",
-                    "  help clear echo ver mem",
+                    "  help clear echo ver mem pwd",
+                    "  ls [dir]        list a directory",
+                    "  cd <dir>        change directory (.. = up)",
+                    "  cat <file>      print a file",
+                    "  mkdir <dir>     create a directory",
+                    "  touch <file>    create an empty file",
+                    "  write <f> <tx>  write text to a file",
+                    "  rm <path>       remove a file or empty dir",
                     "  bell            2-qubit Bell state, 1000 shots",
                     "  ghz             3-qubit GHZ state, 1000 shots",
                     "  qrng [n]        n quantum random bits (default 8)",
@@ -228,6 +284,77 @@ impl Terminal {
                 }
             }
             "clear" => self.lines.clear(),
+            "pwd" => {
+                let p = if self.cwd.is_empty() { "/".to_string() } else { format!("/{}", self.cwd) };
+                self.push(p);
+            }
+            "ls" => {
+                let dir = self.resolve(rest);
+                if !dir.is_empty() && !crate::fs::is_dir(dir.as_bytes()) {
+                    self.push(format!("ls: not a directory: /{}", dir));
+                } else {
+                    let mut entries = crate::fs::get_entries(dir.as_bytes());
+                    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                    if entries.is_empty() {
+                        self.push("(empty)".to_string());
+                    }
+                    for (name, is_dir, size) in entries {
+                        if is_dir {
+                            self.push(format!("  {}/", name));
+                        } else {
+                            self.push(format!("  {}   {} B", name, size));
+                        }
+                    }
+                }
+            }
+            "cd" => {
+                let target = self.resolve(rest);
+                if target.is_empty() || crate::fs::is_dir(target.as_bytes()) {
+                    self.cwd = target;
+                } else {
+                    self.push(format!("cd: no such directory: {}", rest));
+                }
+            }
+            "cat" => {
+                if rest.is_empty() {
+                    self.push("usage: cat <file>".to_string());
+                } else {
+                    let path = self.resolve(rest);
+                    match crate::fs::read(path.as_bytes()) {
+                        Some(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            for line in text.split('\n') {
+                                self.push(line.to_string());
+                            }
+                        }
+                        None => self.push(format!("cat: cannot read /{}", path)),
+                    }
+                }
+            }
+            "mkdir" => match self.op(rest, "usage: mkdir <dir>", |p| crate::fs::mkdir(p)) {
+                Some(msg) => self.push(msg),
+                None => {}
+            },
+            "touch" => match self.op(rest, "usage: touch <file>", |p| crate::fs::touch(p)) {
+                Some(msg) => self.push(msg),
+                None => {}
+            },
+            "rm" => match self.op(rest, "usage: rm <path>", |p| crate::fs::remove(p)) {
+                Some(msg) => self.push(msg),
+                None => {}
+            },
+            "write" => {
+                match rest.split_once(' ') {
+                    Some((name, text)) if !name.is_empty() => {
+                        let path = self.resolve(name);
+                        match crate::fs::write(path.as_bytes(), text.as_bytes()) {
+                            Ok(()) => self.push(format!("wrote {} B to /{}", text.len(), path)),
+                            Err(e) => self.push(format!("write: {}", e)),
+                        }
+                    }
+                    _ => self.push("usage: write <file> <text>".to_string()),
+                }
+            }
             "echo" => self.push(rest.to_string()),
             "ver" => self.push("QOS 0.1 — UEFI x86-64, native compositor UI, quantum control plane".to_string()),
             "mem" => {
@@ -835,11 +962,11 @@ impl Desktop {
                 let start = total.saturating_sub(rows - 1);
                 let mut ty = inner.y + 24;
                 for line in &self.term.lines[start..] {
-                    let col = if line.starts_with("qos:\\>") { green } else { theme.text };
+                    let col = if line.starts_with("qos:/") { green } else { theme.text };
                     fr.draw_text(s, tx, ty, line, 14.0, col);
                     ty += line_h;
                 }
-                let prompt = format!("qos:\\> {}_", self.term.input);
+                let prompt = format!("{} {}_", self.term.prompt(), self.term.input);
                 fr.draw_text(s, tx, ty, &prompt, 14.0, green);
             }
             AppKind::Files => {
