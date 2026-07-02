@@ -63,6 +63,19 @@ fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
     s.rounded_rect(Rect::new(cx - d / 2, cy - d / 2, d, d), d / 2, color);
 }
 
+// Per-app clickable geometry, shared by drawing + hit-testing so they stay in sync (`win` = window
+// rect). Files entry rows, Quantum Lab run buttons, and the Settings theme toggle.
+fn files_row_rect(win: Rect, i: usize) -> Rect {
+    Rect::new(win.x + 16, win.y + HEADER_H + 42 + i as i32 * 28, win.w - 32, 24)
+}
+fn qlab_btn_rect(win: Rect, i: usize) -> Rect {
+    Rect::new(win.x + 24 + i as i32 * 150, win.y + HEADER_H + 108, 132, 40)
+}
+fn settings_theme_rect(win: Rect) -> Rect {
+    Rect::new(win.x + 24, win.y + HEADER_H + 30, 220, 36)
+}
+const FILES_MAX_ROWS: usize = 6;
+
 /// An open window on the desktop.
 struct Win {
     rect: Rect,
@@ -246,6 +259,11 @@ struct Desktop {
     damage: Rect,
     /// The working terminal (shared by the Terminal window).
     term: Terminal,
+    /// Files app: current directory (empty = root) + optional file preview text.
+    files_cwd: String,
+    files_preview: Option<String>,
+    /// Quantum Lab: last run's result lines.
+    qlab: Vec<String>,
 }
 
 /// Margin around a window rect that its shadow extends into (for damage rects).
@@ -255,8 +273,8 @@ impl Desktop {
     fn new(w: i32, h: i32) -> Self {
         // Start with two cascaded windows so the desktop looks alive.
         let wins = vec![
-            Win { rect: Rect::new(w / 2 - 430, 96, 520, 360), kind: AppKind::Terminal },
-            Win { rect: Rect::new(w / 2 - 20, 250, 500, 320), kind: AppKind::Files },
+            Win { rect: Rect::new(w / 2 - 440, 84, 540, 400), kind: AppKind::Terminal },
+            Win { rect: Rect::new(w / 2 - 40, 250, 520, 400), kind: AppKind::Files },
         ];
         Desktop {
             w,
@@ -269,7 +287,116 @@ impl Desktop {
             full: true,
             damage: Rect::new(0, 0, 0, 0),
             term: Terminal::new(),
+            files_cwd: String::new(),
+            files_preview: None,
+            qlab: Vec::new(),
         }
+    }
+
+    // ---- app actions (invoked by body clicks) ----
+    /// The Files listing for the current directory: `..` (unless at root) then dirs, then files,
+    /// each sorted by name. Used by both drawing and click hit-testing.
+    fn files_list(&self) -> Vec<(String, bool, usize)> {
+        let mut entries = crate::fs::get_entries(self.files_cwd.as_bytes());
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        let mut list = Vec::new();
+        if !self.files_cwd.is_empty() {
+            list.push(("..".to_string(), true, 0));
+        }
+        list.extend(entries);
+        list
+    }
+
+    /// Dispatch a click inside a focused window's body to the app.
+    fn on_body_click(&mut self, kind: AppKind, wr: Rect, cx: i32, cy: i32) {
+        match kind {
+            AppKind::Files => {
+                let list = self.files_list();
+                for (i, (name, is_dir, _)) in list.iter().enumerate().take(FILES_MAX_ROWS) {
+                    if files_row_rect(wr, i).contains(cx, cy) {
+                        let (n, d) = (name.clone(), *is_dir);
+                        self.files_click(&n, d);
+                        return;
+                    }
+                }
+            }
+            AppKind::Quantum => {
+                for idx in 0..2 {
+                    if qlab_btn_rect(wr, idx).contains(cx, cy) {
+                        self.qlab_run(idx as u8);
+                        return;
+                    }
+                }
+            }
+            AppKind::Settings => {
+                if settings_theme_rect(wr).contains(cx, cy) {
+                    self.theme = self.theme.toggled();
+                    self.mark_full();
+                }
+            }
+            AppKind::Terminal => {}
+        }
+    }
+
+    /// Navigate the Files app into `name` (a subdir) or up (`..`), or preview a file.
+    fn files_click(&mut self, name: &str, is_dir: bool) {
+        if name == ".." {
+            // Go up one path segment.
+            if let Some(pos) = self.files_cwd.rfind('/') {
+                self.files_cwd.truncate(pos);
+            } else {
+                self.files_cwd.clear();
+            }
+            self.files_preview = None;
+        } else if is_dir {
+            if !self.files_cwd.is_empty() {
+                self.files_cwd.push('/');
+            }
+            self.files_cwd.push_str(name);
+            self.files_preview = None;
+        } else {
+            // Preview the file's text.
+            let path = if self.files_cwd.is_empty() {
+                name.to_string()
+            } else {
+                format!("{}/{}", self.files_cwd, name)
+            };
+            self.files_preview = Some(match crate::fs::read(path.as_bytes()) {
+                Some(bytes) => {
+                    let mut s = String::new();
+                    for &b in bytes.iter().take(400) {
+                        s.push(if b == b'\n' || (0x20..0x7f).contains(&b) { b as char } else { '.' });
+                    }
+                    s
+                }
+                None => "(cannot read)".to_string(),
+            });
+        }
+        self.mark_full();
+    }
+
+    /// Run the given quantum program in the Quantum Lab and capture measurement counts.
+    fn qlab_run(&mut self, kind: u8) {
+        self.qlab.clear();
+        match kind {
+            0 => {
+                let (z, o) = crate::quantum::sim::run_bell(1000);
+                self.qlab.push(format!("Bell x1000:  00 -> {}   11 -> {}", z, o));
+            }
+            _ => match crate::quantum::sim::run_qasm2(
+                b"OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\nmeasure q[0]->c[0];\nmeasure q[1]->c[1];\nmeasure q[2]->c[2];\n",
+                1000,
+            ) {
+                Ok(res) => {
+                    self.qlab.push("GHZ x1000:".to_string());
+                    for (k, v) in res.counts.iter() {
+                        self.qlab.push(format!("  {} -> {}", k, v));
+                    }
+                }
+                Err(_) => self.qlab.push("parse error".to_string()),
+            },
+        }
+        self.mark_full();
     }
 
     /// True if the focused (topmost) window is the Terminal — then typed keys go to it.
@@ -327,7 +454,7 @@ impl Desktop {
             self.wins.push(win); // raise
         } else {
             let n = self.wins.len() as i32;
-            let rect = Rect::new((self.w / 2 - 260 + n * 28).max(20), (110 + n * 28).min(self.h - 360), 500, 320);
+            let rect = Rect::new((self.w / 2 - 270 + n * 28).max(20), (96 + n * 28).min(self.h - 420), 540, 400);
             self.wins.push(Win { rect, kind });
         }
         self.mark_full();
@@ -370,13 +497,16 @@ impl Desktop {
                 return;
             }
             if r.contains(cx, cy) {
-                // Raise; if on the header, begin dragging.
+                // Raise; then either start dragging (header) or dispatch a body click to the app.
                 let win = self.wins.remove(i);
-                let on_header = cy < win.rect.y + HEADER_H;
-                let off = (cx - win.rect.x, cy - win.rect.y);
+                let (wr, kind) = (win.rect, win.kind);
+                let on_header = cy < wr.y + HEADER_H;
+                let off = (cx - wr.x, cy - wr.y);
                 self.wins.push(win);
                 if on_header {
                     self.drag = Some((self.wins.len() - 1, off.0, off.1));
+                } else {
+                    self.on_body_click(kind, wr, cx, cy);
                 }
                 self.mark_full();
                 return;
@@ -445,28 +575,65 @@ impl Desktop {
                 fr.draw_text(s, tx, ty, &prompt, 14.0, green);
             }
             AppKind::Files => {
-                for (j, name) in ["Documents", "quantum", "readme.txt", "bell.qasm"].iter().enumerate() {
-                    let ry = by + j as i32 * 34;
-                    s.rounded_rect(Rect::new(bx, ry, r.w - 44, 26), 6, theme.surface_alt);
-                    fr.draw_text(s, bx + 12, ry + 19, name, 15.0, theme.text);
+                // Real listing of the current directory (the in-kernel filesystem).
+                let path = if self.files_cwd.is_empty() { "/".to_string() } else { format!("/{}", self.files_cwd) };
+                fr.draw_text(s, bx, r.y + HEADER_H + 26, &path, 14.0, theme.text_dim);
+                let list = self.files_list();
+                for (i, (name, is_dir, size)) in list.iter().take(FILES_MAX_ROWS).enumerate() {
+                    let rr = files_row_rect(r, i);
+                    s.rounded_rect(rr, 6, theme.surface_alt);
+                    let icon = if *is_dir { "[D]" } else { "[F]" };
+                    fr.draw_text(s, rr.x + 10, rr.y + 17, icon, 13.0, if *is_dir { theme.accent } else { theme.text_dim });
+                    fr.draw_text(s, rr.x + 46, rr.y + 17, name, 14.0, theme.text);
+                    if !*is_dir {
+                        let sz = format!("{} B", size);
+                        let sw = fr.text_width(&sz, 12.0);
+                        fr.draw_text(s, rr.right() - sw - 12, rr.y + 17, &sz, 12.0, theme.text_dim);
+                    }
+                }
+                if let Some(prev) = &self.files_preview {
+                    let rows = list.len().min(FILES_MAX_ROWS);
+                    let py = files_row_rect(r, rows).y + 6;
+                    s.fill_rect(Rect::new(r.x + 16, py, r.w - 32, 1), theme.border);
+                    let mut ly = py + 22;
+                    for line in prev.split('\n').take(5) {
+                        fr.draw_text(s, r.x + 20, ly, line, 13.0, theme.text_dim);
+                        ly += 18;
+                    }
                 }
             }
             AppKind::Quantum => {
-                fr.draw_text(s, bx, by + 8, "Circuit: Bell state", 16.0, theme.text);
-                for (j, line) in ["q0 : |0> --[H]--*--", "q1 : |0> -------X--"].iter().enumerate() {
-                    fr.draw_text(s, bx, by + 44 + j as i32 * 28, line, 15.0, theme.text_dim);
+                fr.draw_text(s, bx, by, "Circuit:", 14.0, theme.text_dim);
+                for (j, line) in ["q0 |0>  H  *", "q1 |0>     X"].iter().enumerate() {
+                    fr.draw_text(s, bx, by + 26 + j as i32 * 22, line, 15.0, theme.text);
                 }
-                let btn = Rect::new(bx, by + 120, 130, 38);
-                s.rounded_rect(btn, 9, theme.accent);
-                let bw = fr.text_width("Run", 16.0);
-                fr.draw_text(s, btn.x + (btn.w - bw) / 2, btn.y + 25, "Run", 16.0, theme.on_accent);
+                for (idx, label) in [(0usize, "Run Bell"), (1usize, "Run GHZ")] {
+                    let b = qlab_btn_rect(r, idx);
+                    s.rounded_rect(b, 9, theme.accent);
+                    let lw = fr.text_width(label, 15.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 26, label, 15.0, theme.on_accent);
+                }
+                let mut ry = qlab_btn_rect(r, 0).bottom() + 26;
+                if self.qlab.is_empty() {
+                    fr.draw_text(s, bx, ry, "click Run to simulate + measure", 13.0, theme.text_dim);
+                }
+                for line in self.qlab.iter().take(7) {
+                    fr.draw_text(s, bx, ry, line, 14.0, theme.text);
+                    ry += 20;
+                }
             }
             AppKind::Settings => {
-                fr.draw_text(s, bx, by + 8, "Appearance", 16.0, theme.text);
-                let label = if theme.is_dark { "Theme:  Dark" } else { "Theme:  Light" };
-                fr.draw_text(s, bx, by + 44, label, 15.0, theme.text_dim);
-                fr.draw_text(s, bx, by + 96, "System", 16.0, theme.text);
-                fr.draw_text(s, bx, by + 132, "QOS 0.1  -  1280x800  -  USB kbd+mouse", 14.0, theme.text_dim);
+                fr.draw_text(s, bx, by, "Appearance", 16.0, theme.text);
+                let tr = settings_theme_rect(r);
+                s.rounded_rect(tr, 9, theme.surface_alt);
+                let label = if theme.is_dark { "Theme:  Dark   (click)" } else { "Theme:  Light   (click)" };
+                fr.draw_text(s, tr.x + 14, tr.y + 24, label, 14.0, theme.text);
+                fr.draw_text(s, bx, tr.bottom() + 40, "System", 16.0, theme.text);
+                let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                let info1 = format!("QOS 0.1    {}x{}    heap {} MiB", self.w, self.h, crate::allocator::HEAP_SIZE / 1024 / 1024);
+                let info2 = format!("uptime {} s    USB keyboard + mouse", ticks / 100);
+                fr.draw_text(s, bx, tr.bottom() + 72, &info1, 14.0, theme.text_dim);
+                fr.draw_text(s, bx, tr.bottom() + 94, &info2, 14.0, theme.text_dim);
             }
         }
     }

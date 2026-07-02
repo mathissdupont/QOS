@@ -680,10 +680,31 @@ impl HidEndpoint {
         }
         match self.kind {
             1 => self.process_keyboard_report(&report),
-            2 => process_mouse_report(&report),
+            2 => self.process_mouse_report(&report),
             _ => {}
         }
         self.prev_report = report;
+    }
+
+    /// Boot mouse report: byte 0 = button bitmap, byte 1 = dx, byte 2 = dy (signed). Emit relative
+    /// motion and — by diffing byte 0 against the previous report — proper button **press and
+    /// release** events (so clicks register and window drags end on release). HID +dy is "down"; the
+    /// queue's convention is +dy = "up", so negate.
+    fn process_mouse_report(&mut self, report: &[u8; 8]) {
+        use crate::input::{self, InputEvent, MouseButton};
+        let dx = report[1] as i8 as i16;
+        let dy = report[2] as i8 as i16;
+        if dx != 0 || dy != 0 {
+            input::push(InputEvent::MouseMove { dx, dy: -dy });
+        }
+        let prev = self.prev_report[0];
+        for (bit, button) in [(0, MouseButton::Left), (1, MouseButton::Right), (2, MouseButton::Middle)] {
+            let now = report[0] & (1 << bit) != 0;
+            let was = prev & (1 << bit) != 0;
+            if now != was {
+                input::push(InputEvent::MouseButton { button, pressed: now });
+            }
+        }
     }
 
     /// Boot keyboard report: byte 0 = modifier bitmap, bytes 2..8 = currently-pressed HID usage IDs.
@@ -719,24 +740,6 @@ impl HidEndpoint {
                     crate::keyboard::push_scancode(sc | 0x80);
                 }
             }
-        }
-    }
-}
-
-/// Boot mouse report: byte 0 = button bitmap, byte 1 = dx, byte 2 = dy (both signed). Feed the
-/// unified input queue. HID +dy means "down"; the queue's convention is +dy = "up" (PS/2), so negate.
-fn process_mouse_report(report: &[u8; 8]) {
-    use crate::input::{self, InputEvent, MouseButton};
-    let dx = report[1] as i8 as i16;
-    let dy = report[2] as i8 as i16;
-    if dx != 0 || dy != 0 {
-        input::push(InputEvent::MouseMove { dx, dy: -dy });
-    }
-    // We don't track previous button state here (mouse clicks are less critical for bring-up); emit
-    // a press event per set button each report. Left=bit0, Right=bit1, Middle=bit2.
-    for (bit, button) in [(0, MouseButton::Left), (1, MouseButton::Right), (2, MouseButton::Middle)] {
-        if report[0] & (1 << bit) != 0 {
-            input::push(InputEvent::MouseButton { button, pressed: true });
         }
     }
 }

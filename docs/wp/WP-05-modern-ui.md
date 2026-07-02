@@ -61,9 +61,11 @@ host-tested.
   QEMU (screenshots): apps open via keys with distinct content, focus ring + dock dots, cursor
   tracks mouse motion, and both light + dark themes render at native 1280×800. (Full generic
   `Widget` trait/toolkit deferred; the WM covers the needed interactions.)
-- [ ] **Step 5 — Apps (E-73).** Terminal (wraps the shell), file manager (FAT16), Quantum Lab
-  (modernizes `QuantumApp`), settings/system monitor, + further built-ins. Each app screenshot-
-  verified.
+- [~] **Step 5 — Apps (E-73).** (Terminal DONE) A real in-window terminal: scrollback + input,
+  Set-1 scancode→char with Shift, focus-based key routing, dirty-only-the-window redraw. Commands
+  hit real subsystems — `bell`/`ghz`/`qrng` run the actual `quantum::sim` simulator and print
+  measurement counts (verified: `bell` → `00 -> 495  11 -> 505`), plus help/clear/echo/ver/mem.
+  (Todo) Files → real FAT16, Quantum Lab → dedicated circuit runner, Settings → real/persistent.
 
 ## Acceptance criteria
 
