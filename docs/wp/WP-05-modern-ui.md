@@ -109,9 +109,20 @@ host-tested.
     **Up/Down/Enter** navigate rows — Files is fully usable without a mouse. Verified in QEMU
     (0-fault) against the previously-persisted image: keyboard-only entry into the disk, note.txt
     previews its persisted contents, `e` opens it as `disk:note.txt` in the editor.
-  - [ ] **Next (step 5 cont.):** more apps (calculator, devices/network panel, process viewer);
-    Files listing scroll (rows beyond `FILES_MAX_ROWS` are hidden); deepen the quantum layer
-    (visual circuit editor, RX/RY/RZ, histogram — MASTERPLAN E-80).
+  - **9 apps + real-OS polish.** Three new apps: **Calculator** (grid + keyboard,
+    immediate-execution), **Devices** (real full PCI inventory + USB/AHCI/network), **Processes**
+    (open apps with focus state + live kernel subsystem rows incl. a real `SIM_JOBS` quantum
+    counter; ~1 Hz refresh). Polish per the user's "icons missing / Settings bare / want a real
+    macOS-like UI" feedback: **vector-drawn dock icons** (9 distinct glyphs from AA primitives) +
+    mini icons in window title bars; **yellow = minimize** (restore from dock) and **green =
+    maximize/restore** now really work; **Settings redesigned** (Dark/Light preview cards +
+    Display/Input/Storage/About rows, all real data); the **top-bar clock is the real RTC** (24 h,
+    minute-rollover refresh); Files listing **scrolls** with an above/below indicator; number keys
+    `1`–`9` open apps. Verified in QEMU (0-fault, screenshots): 12+34=46, full PCI list, live
+    Processes, theme cards, real clock.
+  - [ ] **Next (step 5 cont.):** deepen the quantum layer (visual circuit editor, RX/RY/RZ,
+    histogram — MASTERPLAN E-80); optional later: image viewer, wallpaper choices, window resize
+    by edge drag, notifications.
 
 ## Acceptance criteria
 
