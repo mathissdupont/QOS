@@ -3,7 +3,8 @@
 - Status: 🟡 in progress
 - Epic: E-80 (quantum control plane), E-73 (apps)
 - ADRs: ADR-0021 (in-OS QASM toolchain)
-- Commits: 78ee1ef (slice 1: editing core + sidebar + live preview)
+- Commits: 78ee1ef (slice 1: editing core + sidebar + live preview), a0b3753 (slice 2:
+  line-numbered errors + problems row + jump-to-problem)
 
 ## Goal
 
@@ -26,8 +27,14 @@ teletype.
   mid-buffer edits; inserting `z q[0];` updates the preview instantly and F5 gives the
   physically correct unchanged Bell split (Z = phase only). A transient caret/status mismatch
   was diagnosed as a torn-frame screendump (screenshot raced the framebuffer blit), not a bug.
-- [ ] **Slice 2 — problems + navigation.** Parser line numbers (extend `ParseError`), a problems
-  panel listing errors with their line, click-to-jump; click-to-position in the code pane.
+- [x] **Slice 2 — problems + navigation.** `ParseError` is now `{ line, kind }` (1-based source
+  line at every error site, computed lazily; `.message()` renders `line N: …`, 0 = program-level);
+  all consumers migrated (sim, IDE, Terminal `qasm`). IDE diagnostics: the problems row shows
+  `(!) line N: message` with a jump hint, **click or F8** moves the cursor to the offending line,
+  the problem line's **gutter number turns red**, and clicking the code pane positions the cursor
+  (line-exact; column via average glyph advance — per-glyph metrics later). Verified in QEMU
+  (0-fault): broken `cx q[0]` → `(!) line 8: syntax: expected ','` + red gutter 8; F8 after
+  wandering → `Ln 8, Col 1`. Harness note: TCG queues keystrokes — settle before screendump.
 - [ ] **Slice 3 — shared editing core.** Factor the editing core out (module or `qos-ui`) and
   adopt it in the Text Editor; selections + clipboard.
 - [ ] **Slice 4 — IDE affordances.** Per-token syntax highlighting; autocompletion of gate
