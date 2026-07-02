@@ -211,9 +211,28 @@ fn settings_card_rect(win: Rect, i: usize) -> Rect {
 fn editor_btn_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 16 + i as i32 * 96, win.y + HEADER_H + 10, 88, 26)
 }
-/// QASM Studio action buttons (0 = Compile, 1 = Run, 2 = Save).
+/// Quantum IDE action buttons (0 = Compile, 1 = Run, 2 = Save).
 fn qasm_btn_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 16 + i as i32 * 96, win.y + HEADER_H + 10, 88, 26)
+}
+// Quantum IDE layout (VS Code-like): sidebar | code pane, preview strip + status bar below.
+const QASM_PREVIEW_H: i32 = 96;
+const QASM_STATUS_H: i32 = 20;
+fn qasm_side_rect(win: Rect) -> Rect {
+    let top = win.y + HEADER_H + 44;
+    Rect::new(win.x + 10, top, 150, win.bottom() - top - QASM_PREVIEW_H - QASM_STATUS_H - 18)
+}
+fn qasm_side_row_rect(win: Rect, i: usize) -> Rect {
+    let s = qasm_side_rect(win);
+    Rect::new(s.x + 4, s.y + 26 + i as i32 * 22, s.w - 8, 20)
+}
+fn qasm_code_rect(win: Rect) -> Rect {
+    let s = qasm_side_rect(win);
+    Rect::new(s.right() + 6, s.y, win.right() - s.right() - 16, s.h)
+}
+fn qasm_preview_rect(win: Rect) -> Rect {
+    let s = qasm_side_rect(win);
+    Rect::new(win.x + 10, s.bottom() + 6, win.w - 20, QASM_PREVIEW_H)
 }
 const FILES_MAX_ROWS: usize = 5;
 
@@ -886,10 +905,15 @@ struct Desktop {
     calc: Calc,
     /// Files: scroll offset into the listing (rows above it are hidden).
     files_scroll: usize,
-    /// QASM Studio: source buffer, optional backing file, compiler/runner status, last histogram.
-    qasm_buf: String,
+    /// Quantum IDE (QASM Studio, WP-07): line-based source buffer with a real cursor
+    /// (line, column in chars), backing file, status, problem marker, live-parsed circuit
+    /// preview, and the last run's histogram.
+    qasm_lines: Vec<String>,
+    qasm_cur: (usize, usize),
     qasm_path: Option<String>,
     qasm_status: String,
+    qasm_problem: Option<String>,
+    qasm_preview: Option<(usize, Vec<crate::quantum::parser::Instruction>)>,
     qasm_result: Vec<(String, u64)>,
 }
 
@@ -903,7 +927,7 @@ impl Desktop {
             Win::new(Rect::new(w / 2 - 440, 74, 540, 440), AppKind::Terminal),
             Win::new(Rect::new(w / 2 - 40, 230, 520, 440), AppKind::Files),
         ];
-        Desktop {
+        let mut desk = Desktop {
             w,
             h,
             theme: Theme::dark(),
@@ -939,11 +963,18 @@ impl Desktop {
             editor_status: "no file open — open one from Files".to_string(),
             calc: Calc::new(),
             files_scroll: 0,
-            qasm_buf: "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n".to_string(),
+            qasm_lines: Vec::new(),
+            qasm_cur: (0, 0),
             qasm_path: None,
-            qasm_status: "Bell template loaded · F4 compile · F5 run · F2 save".to_string(),
+            qasm_status: "Bell template · F4 compile · F5 run · F2 save".to_string(),
+            qasm_problem: None,
+            qasm_preview: None,
             qasm_result: Vec::new(),
-        }
+        };
+        desk.qasm_set_text(
+            "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];",
+        );
+        desk
     }
 
     // ---- app actions (invoked by body clicks) ----
@@ -1109,6 +1140,19 @@ impl Desktop {
                 }
                 if qasm_btn_rect(wr, 2).contains(cx, cy) {
                     self.qasm_save();
+                    return;
+                }
+                // Sidebar: click a workspace file to open it in the editor.
+                let files = self.qasm_workspace_files();
+                for (i, f) in files.iter().enumerate() {
+                    if qasm_side_row_rect(wr, i).contains(cx, cy) {
+                        let content = crate::fs::read(f.as_bytes())
+                            .map(|b| String::from_utf8_lossy(&b).into_owned())
+                            .unwrap_or_default();
+                        let f = f.clone();
+                        self.qasm_open(Some(f), content);
+                        return;
+                    }
                 }
             }
             AppKind::Terminal | AppKind::Monitor | AppKind::Devices | AppKind::Processes => {}
@@ -1568,12 +1612,155 @@ impl Desktop {
         self.wins.last().filter(|w| !w.minimized)
     }
 
-    // ---- QASM Studio (in-OS quantum toolchain: edit → compile → run) ----
+    // ---- Quantum IDE (WP-07): real editing core + live preview + toolchain ----
+    /// The buffer as one source string (for the parser / saving).
+    fn qasm_text(&self) -> String {
+        self.qasm_lines.join("\n")
+    }
+
+    /// Replace the buffer, put the cursor at the end, and refresh the live preview.
+    fn qasm_set_text(&mut self, s: &str) {
+        self.qasm_lines = s.split('\n').map(|l| l.to_string()).collect();
+        if self.qasm_lines.is_empty() {
+            self.qasm_lines.push(String::new());
+        }
+        let last = self.qasm_lines.len() - 1;
+        self.qasm_cur = (last, self.qasm_lines[last].chars().count());
+        self.qasm_reparse();
+    }
+
+    /// Live-parse the buffer for the circuit preview + problem marker (cheap for editor-sized
+    /// sources; capped so a huge paste can't stall the UI).
+    fn qasm_reparse(&mut self) {
+        use crate::quantum::{parser, sim};
+        let text = self.qasm_text();
+        if text.len() > 16 * 1024 {
+            self.qasm_preview = None;
+            self.qasm_problem = Some("source too large for live preview".to_string());
+            return;
+        }
+        match parser::parse_qasm2(text.as_bytes()) {
+            Ok(prog) if prog.n_qubits >= 1 && prog.n_qubits <= sim::MAX_QUBITS => {
+                self.qasm_problem = None;
+                self.qasm_preview = Some((prog.n_qubits, prog.instructions));
+            }
+            Ok(prog) => {
+                self.qasm_preview = None;
+                self.qasm_problem = Some(format!("qubit count {} out of range", prog.n_qubits));
+            }
+            Err(e) => {
+                self.qasm_preview = None;
+                self.qasm_problem = Some(format!("{:?}", e));
+            }
+        }
+    }
+
+    /// Clamp the cursor column to the current line length (after vertical moves).
+    fn qasm_clamp_col(&mut self) {
+        let line_len = self.qasm_lines[self.qasm_cur.0].chars().count();
+        if self.qasm_cur.1 > line_len {
+            self.qasm_cur.1 = line_len;
+        }
+    }
+
+    /// Cursor movement: dx = -1/+1 within the line (wrapping over line ends), dy = -1/+1 lines.
+    fn qasm_move(&mut self, dx: i32, dy: i32) {
+        if dy < 0 && self.qasm_cur.0 > 0 {
+            self.qasm_cur.0 -= 1;
+            self.qasm_clamp_col();
+        } else if dy > 0 && self.qasm_cur.0 + 1 < self.qasm_lines.len() {
+            self.qasm_cur.0 += 1;
+            self.qasm_clamp_col();
+        }
+        if dx < 0 {
+            if self.qasm_cur.1 > 0 {
+                self.qasm_cur.1 -= 1;
+            } else if self.qasm_cur.0 > 0 {
+                self.qasm_cur.0 -= 1;
+                self.qasm_cur.1 = self.qasm_lines[self.qasm_cur.0].chars().count();
+            }
+        } else if dx > 0 {
+            let len = self.qasm_lines[self.qasm_cur.0].chars().count();
+            if self.qasm_cur.1 < len {
+                self.qasm_cur.1 += 1;
+            } else if self.qasm_cur.0 + 1 < self.qasm_lines.len() {
+                self.qasm_cur.0 += 1;
+                self.qasm_cur.1 = 0;
+            }
+        }
+        self.mark_top_window();
+    }
+
+    /// Byte offset of char-column `col` in `line` (UTF-8 safe).
+    fn byte_at(line: &str, col: usize) -> usize {
+        line.char_indices().nth(col).map(|(i, _)| i).unwrap_or(line.len())
+    }
+
+    /// Insert a character at the cursor.
+    fn qasm_insert(&mut self, c: char) {
+        if self.qasm_text().len() >= 32 * 1024 {
+            return;
+        }
+        let (l, col) = self.qasm_cur;
+        let at = Self::byte_at(&self.qasm_lines[l], col);
+        self.qasm_lines[l].insert(at, c);
+        self.qasm_cur.1 += 1;
+        self.qasm_reparse();
+        self.mark_top_window();
+    }
+
+    /// Backspace: delete before the cursor, joining lines at column 0.
+    fn qasm_backspace(&mut self) {
+        let (l, col) = self.qasm_cur;
+        if col > 0 {
+            let at = Self::byte_at(&self.qasm_lines[l], col - 1);
+            self.qasm_lines[l].remove(at);
+            self.qasm_cur.1 -= 1;
+        } else if l > 0 {
+            let tail = self.qasm_lines.remove(l);
+            let prev_len = self.qasm_lines[l - 1].chars().count();
+            self.qasm_lines[l - 1].push_str(&tail);
+            self.qasm_cur = (l - 1, prev_len);
+        }
+        self.qasm_reparse();
+        self.mark_top_window();
+    }
+
+    /// Enter: split the current line at the cursor.
+    fn qasm_newline(&mut self) {
+        let (l, col) = self.qasm_cur;
+        let at = Self::byte_at(&self.qasm_lines[l], col);
+        let tail = self.qasm_lines[l].split_off(at);
+        self.qasm_lines.insert(l + 1, tail);
+        self.qasm_cur = (l + 1, 0);
+        self.qasm_reparse();
+        self.mark_top_window();
+    }
+
+    /// Workspace `.qasm` sources for the sidebar: root + the `quantum/` folder (capped).
+    fn qasm_workspace_files(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, is_dir, _) in crate::fs::get_entries(b"") {
+            if !is_dir && name.ends_with(".qasm") {
+                out.push(name);
+            }
+        }
+        for (name, is_dir, _) in crate::fs::get_entries(b"quantum") {
+            if !is_dir && name.ends_with(".qasm") {
+                out.push(format!("quantum/{}", name));
+            }
+        }
+        out.sort();
+        out.truncate(10);
+        out
+    }
+
     /// Compile the buffer: parse + validate, then run the transpile passes (self-inverse pair
     /// cancellation + depth analysis) and report the stats — errors land in the status line.
     fn qasm_compile(&mut self) {
         use crate::quantum::{parser, sim, transpile};
-        match parser::parse_qasm2(self.qasm_buf.as_bytes()) {
+        let text = self.qasm_text();
+        match parser::parse_qasm2(text.as_bytes()) {
             Ok(prog) => {
                 if prog.n_qubits == 0 || prog.n_qubits > sim::MAX_QUBITS {
                     self.qasm_status = format!("error: qubit count {} out of range (1..={})", prog.n_qubits, sim::MAX_QUBITS);
@@ -1596,7 +1783,8 @@ impl Desktop {
     /// Run the buffer on the simulator (through the optimizer) and keep the top outcomes.
     fn qasm_run_buf(&mut self) {
         use crate::quantum::{parser, sim, transpile};
-        match parser::parse_qasm2(self.qasm_buf.as_bytes()) {
+        let text = self.qasm_text();
+        match parser::parse_qasm2(text.as_bytes()) {
             Ok(prog) => {
                 let (opt, _) = transpile::cancel_pairs(prog.instructions);
                 match sim::run_program(prog.n_qubits, prog.n_cbits.max(prog.n_qubits), opt, QLAB_SHOTS) {
@@ -1619,23 +1807,24 @@ impl Desktop {
     /// Save the buffer to its backing file (RAM fs or `disk:`), defaulting to `draft.qasm`.
     fn qasm_save(&mut self) {
         let path = self.qasm_path.clone().unwrap_or_else(|| "draft.qasm".to_string());
+        let text = self.qasm_text();
         let res = match path.strip_prefix("disk:") {
-            Some(name) => crate::diskfs::write(name.as_bytes(), self.qasm_buf.as_bytes()),
-            None => crate::fs::write(path.as_bytes(), self.qasm_buf.as_bytes()),
+            Some(name) => crate::diskfs::write(name.as_bytes(), text.as_bytes()),
+            None => crate::fs::write(path.as_bytes(), text.as_bytes()),
         };
         self.qasm_status = match res {
             Ok(()) => {
                 self.qasm_path = Some(path.clone());
-                format!("saved {} ({} B)", path, self.qasm_buf.len())
+                format!("saved {} ({} B)", path, text.len())
             }
             Err(e) => format!("save error: {}", e),
         };
         self.mark_top_window();
     }
 
-    /// Open a QASM source in the Studio (used by Files for `.qasm` and by the Lab's export).
+    /// Open a QASM source in the IDE (used by Files for `.qasm` and by the Lab's export).
     fn qasm_open(&mut self, path: Option<String>, content: String) {
-        self.qasm_buf = content;
+        self.qasm_set_text(&content);
         self.qasm_path = path;
         self.qasm_result.clear();
         self.qasm_status = match &self.qasm_path {
@@ -1750,7 +1939,17 @@ impl Desktop {
             self.wins.push(win); // raise
         } else {
             let n = self.wins.len() as i32;
-            let rect = Rect::new((self.w / 2 - 270 + n * 28).max(20), (80 + n * 24).min(self.h - 460), 540, 440);
+            // Per-app default size: the Quantum IDE opens larger (VS Code-like layout needs room).
+            let (ww, wh) = match kind {
+                AppKind::Qasm => (760, 560),
+                _ => (540, 440),
+            };
+            let rect = Rect::new(
+                (self.w / 2 - ww / 2 + n * 24).clamp(12, (self.w - ww - 12).max(12)),
+                (70 + n * 22).min((self.h - wh - 20).max(BAR_H + 8)),
+                ww,
+                wh,
+            );
             self.wins.push(Win::new(rect, kind));
         }
         self.mark_full();
@@ -2021,7 +2220,7 @@ impl Desktop {
                 }
             }
             AppKind::Qasm => {
-                // Toolbar: Compile / Run / Save.
+                // ---- Quantum IDE (WP-07): toolbar | sidebar | code | preview | status ----
                 for (i, label) in ["Compile", "Run", "Save"].iter().enumerate() {
                     let b = qasm_btn_rect(r, i);
                     let accent = i == 1;
@@ -2030,45 +2229,150 @@ impl Desktop {
                     fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 18, label, 13.0, if accent { theme.on_accent } else { theme.text });
                 }
                 fr.draw_text(s, r.x + 16 + 3 * 96 + 8, r.y + HEADER_H + 28, "F4 · F5 · F2 · F10 close", 11.0, theme.text_dim);
-                // Status line (compiler output / errors).
-                fr.draw_text(s, r.x + 16, r.y + HEADER_H + 52, &self.qasm_status, 12.0, theme.text_dim);
-                // Code area with the tail visible (same model as the Text Editor).
-                let res_h = if self.qasm_result.is_empty() { 0 } else { 96 };
-                let area = Rect::new(r.x + 12, r.y + HEADER_H + 62, r.w - 24, r.h - HEADER_H - 74 - res_h);
-                s.rounded_rect(area, 8, qos_ui::rgb(0x10, 0x12, 0x18));
-                let tx = area.x + 12;
+
+                // Sidebar: workspace .qasm files (the open one highlighted).
+                let side = qasm_side_rect(r);
+                s.rounded_rect(side, 8, theme.surface_alt);
+                fr.draw_text(s, side.x + 10, side.y + 17, "EXPLORER", 11.0, theme.text_dim);
+                let files = self.qasm_workspace_files();
+                for (i, f) in files.iter().enumerate() {
+                    let row = qasm_side_row_rect(r, i);
+                    if row.bottom() > side.bottom() - 4 {
+                        break;
+                    }
+                    let open = self.qasm_path.as_deref() == Some(f.as_str());
+                    if open {
+                        s.rounded_rect(row, 5, theme.accent);
+                    }
+                    let name = f.rsplit('/').next().unwrap_or(f);
+                    fr.draw_text(s, row.x + 8, row.y + 15, name, 12.0, if open { theme.on_accent } else { theme.text });
+                }
+                if files.is_empty() {
+                    fr.draw_text(s, side.x + 10, side.y + 40, "(no .qasm files)", 11.0, theme.text_dim);
+                }
+
+                // Code pane: line numbers, current-line highlight, real cursor caret.
+                let code = qasm_code_rect(r);
+                s.rounded_rect(code, 8, qos_ui::rgb(0x10, 0x12, 0x18));
                 let line_h = 18;
-                let max_rows = ((area.h - 16) / line_h).max(1) as usize;
+                let max_rows = ((code.h - 12) / line_h).max(1) as usize;
+                let (cl, cc) = self.qasm_cur;
+                // Scroll so the cursor line is visible.
+                let first = if cl >= max_rows { cl + 1 - max_rows } else { 0 };
+                let gutter = 34;
                 let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
                 let key_col = qos_ui::rgb(0x7a, 0xc8, 0xb0);
-                let lines: Vec<&str> = self.qasm_buf.split('\n').collect();
-                let total = lines.len();
-                let start = total.saturating_sub(max_rows);
-                let mut ty = area.y + 22;
-                for (li, line) in lines.iter().enumerate().skip(start) {
-                    let is_last = li + 1 == total;
-                    let shown = if is_last { format!("{}_", line) } else { (*line).to_string() };
-                    // Light syntax hint: gate/keyword lines tinted.
-                    let col = if line.starts_with("OPENQASM") || line.starts_with("qreg") || line.starts_with("creg") || line.starts_with("measure") {
+                let mut ty = code.y + 20;
+                for (li, line) in self.qasm_lines.iter().enumerate().skip(first).take(max_rows) {
+                    if li == cl {
+                        // Current-line highlight bar.
+                        s.fill_rect(Rect::new(code.x + 2, ty - 13, code.w - 4, line_h), qos_ui::rgb(0x1c, 0x20, 0x2c));
+                    }
+                    let num = format!("{}", li + 1);
+                    let nw = fr.text_width(&num, 11.0);
+                    fr.draw_text(s, code.x + gutter - 8 - nw, ty, &num, 11.0, theme.text_dim);
+                    let col = if line.starts_with("OPENQASM") || line.starts_with("qreg") || line.starts_with("creg") || line.starts_with("measure") || line.starts_with("include") {
                         key_col
                     } else {
                         mono
                     };
-                    fr.draw_text(s, tx, ty, &shown, 13.0, col);
+                    fr.draw_text(s, code.x + gutter, ty, line, 13.0, col);
+                    if li == cl {
+                        // Caret at the cursor column (proportional-font width of the prefix).
+                        let prefix: String = line.chars().take(cc).collect();
+                        let cw = fr.text_width(&prefix, 13.0);
+                        s.fill_rect(Rect::new(code.x + gutter + cw, ty - 12, 2, 15), theme.accent);
+                    }
                     ty += line_h;
                 }
-                // Result histogram under the code area.
-                if !self.qasm_result.is_empty() {
-                    let mut hy = area.bottom() + 8;
-                    let bar_max = r.w - 170;
-                    for (bits, count) in self.qasm_result.iter() {
-                        fr.draw_text(s, r.x + 16, hy + 13, bits, 13.0, theme.text);
-                        let bw = ((*count as i64 * bar_max as i64) / QLAB_SHOTS as i64) as i32;
-                        s.rounded_rect(Rect::new(r.x + 86, hy + 2, bw.max(3), 14), 4, theme.accent);
-                        fr.draw_text(s, r.x + 92 + bw.max(3), hy + 13, &format!("{}", count), 12.0, theme.text_dim);
-                        hy += 20;
+
+                // Live circuit preview strip (reparsed on each edit) / problem marker.
+                let pv = qasm_preview_rect(r);
+                s.rounded_rect(pv, 8, theme.surface_alt);
+                match (&self.qasm_problem, &self.qasm_preview) {
+                    (Some(p), _) => {
+                        fr.draw_text(s, pv.x + 10, pv.y + 20, "(!)", 13.0, qos_ui::rgb(0xe0, 0x60, 0x50));
+                        fr.draw_text(s, pv.x + 36, pv.y + 20, p, 12.0, theme.text);
+                    }
+                    (None, Some((nq, instrs))) => {
+                        let shown_q = (*nq).min(4);
+                        let wire_x0 = pv.x + 34;
+                        let wire_x1 = pv.right() - 12;
+                        let step = 26;
+                        let max_cols = ((wire_x1 - wire_x0 - 8) / step).max(1) as usize;
+                        for q in 0..shown_q {
+                            let wy = pv.y + 16 + q as i32 * 20;
+                            fr.draw_text(s, pv.x + 8, wy + 5, &format!("q{}", q), 11.0, theme.text_dim);
+                            s.fill_rect(Rect::new(wire_x0, wy, wire_x1 - wire_x0, 1), theme.text_dim);
+                        }
+                        use crate::quantum::parser::Instruction as I;
+                        let mut col = 0usize;
+                        for inst in instrs.iter() {
+                            if col >= max_cols {
+                                fr.draw_text(s, wire_x1 - 18, pv.bottom() - 8, "...", 12.0, theme.text_dim);
+                                break;
+                            }
+                            let gx = wire_x0 + 8 + col as i32 * step;
+                            let wy = |q: usize| pv.y + 16 + (q.min(3)) as i32 * 20;
+                            let boxed = |s: &mut Surface, fr: &mut FontRenderer, q: usize, label: &str| {
+                                if q >= shown_q {
+                                    return;
+                                }
+                                let b = Rect::new(gx - 9, wy(q) - 8, 18, 16);
+                                s.rounded_rect(b, 4, qos_ui::rgb(0x8a, 0x5c, 0xd8));
+                                let lw = fr.text_width(label, 10.0);
+                                fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 12, label, 10.0, qos_ui::rgb(0xff, 0xff, 0xff));
+                            };
+                            match inst {
+                                I::H(q) => boxed(s, fr, *q, "H"),
+                                I::X(q) => boxed(s, fr, *q, "X"),
+                                I::Y(q) => boxed(s, fr, *q, "Y"),
+                                I::Z(q) => boxed(s, fr, *q, "Z"),
+                                I::S(q) => boxed(s, fr, *q, "S"),
+                                I::T(q) => boxed(s, fr, *q, "T"),
+                                I::Rx(q, _) => boxed(s, fr, *q, "Rx"),
+                                I::Ry(q, _) => boxed(s, fr, *q, "Ry"),
+                                I::Rz(q, _) => boxed(s, fr, *q, "Rz"),
+                                I::P(q, _) => boxed(s, fr, *q, "P"),
+                                I::Cx(c, t) | I::Cz(c, t) | I::Swap(c, t) => {
+                                    if *c < shown_q && *t < shown_q {
+                                        let (y0, y1) = (wy(*c), wy(*t));
+                                        let (top, bot) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+                                        s.fill_rect(Rect::new(gx - 1, top, 2, bot - top), theme.accent);
+                                        circle(s, gx, y0, 7, theme.accent);
+                                        circle(s, gx, y1, 11, theme.accent);
+                                        circle(s, gx, y1, 7, theme.surface_alt);
+                                    }
+                                }
+                                I::Measure(q, _) => boxed(s, fr, *q, "M"),
+                                I::Reset(q) => boxed(s, fr, *q, "0"),
+                                I::Barrier(_) => {}
+                            }
+                            col += 1;
+                        }
+                        if *nq > shown_q {
+                            fr.draw_text(s, pv.x + 8, pv.bottom() - 8, &format!("+{} more qubits", nq - shown_q), 10.0, theme.text_dim);
+                        }
+                        // Last run's top outcomes, right-aligned in the preview strip.
+                        let mut hy = pv.y + 12;
+                        for (bits, count) in self.qasm_result.iter().take(4) {
+                            let label = format!("{} {}", bits, count);
+                            let lw = fr.text_width(&label, 11.0);
+                            fr.draw_text(s, pv.right() - lw - 10, hy + 6, &label, 11.0, theme.text);
+                            hy += 16;
+                        }
+                    }
+                    _ => {
+                        fr.draw_text(s, pv.x + 10, pv.y + 20, "live circuit preview", 12.0, theme.text_dim);
                     }
                 }
+
+                // Status bar: compiler status left, cursor position right.
+                let sy = pv.bottom() + 14;
+                fr.draw_text(s, r.x + 12, sy, &self.qasm_status, 11.0, theme.text_dim);
+                let pos = format!("Ln {}, Col {}", cl + 1, cc + 1);
+                let pw = fr.text_width(&pos, 11.0);
+                fr.draw_text(s, r.right() - pw - 12, sy, &pos, 11.0, theme.text_dim);
             }
             AppKind::Quantum => {
                 // Gate palette (selected gate highlighted).
@@ -2810,25 +3114,20 @@ pub fn run_demo() {
                             }
                         }
                     } else if desk.focused().map_or(false, |w| w.kind == AppKind::Qasm) {
-                        // Focused QASM Studio: code editing + toolchain function keys.
+                        // Focused Quantum IDE: real cursor editing + toolchain function keys.
                         match scancode {
-                            0x3E => desk.qasm_compile(), // F4
-                            0x3F => desk.qasm_run_buf(), // F5
-                            0x3C => desk.qasm_save(),    // F2
-                            0x0E => {
-                                desk.qasm_buf.pop();
-                                desk.mark_top_window();
-                            } // Backspace
-                            0x1C => {
-                                desk.qasm_buf.push('\n');
-                                desk.mark_top_window();
-                            } // Enter → newline
+                            0x3E => desk.qasm_compile(),      // F4
+                            0x3F => desk.qasm_run_buf(),      // F5
+                            0x3C => desk.qasm_save(),         // F2
+                            0x48 => desk.qasm_move(0, -1),    // Up
+                            0x50 => desk.qasm_move(0, 1),     // Down
+                            0x4B => desk.qasm_move(-1, 0),    // Left
+                            0x4D => desk.qasm_move(1, 0),     // Right
+                            0x0E => desk.qasm_backspace(),    // Backspace (at cursor)
+                            0x1C => desk.qasm_newline(),      // Enter (split at cursor)
                             _ => {
                                 if let Some(c) = scancode_to_char(scancode, shift) {
-                                    if desk.qasm_buf.len() < 32 * 1024 {
-                                        desk.qasm_buf.push(c);
-                                        desk.mark_top_window();
-                                    }
+                                    desk.qasm_insert(c);
                                 }
                             }
                         }

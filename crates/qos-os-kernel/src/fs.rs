@@ -509,6 +509,10 @@ pub fn seed_demo() {
     let _ = fs.write(b"readme.txt", b"Welcome to QOS - a quantum-ready operating system.\n");
     let _ = fs.write(b"quantum/bell.qasm", b"OPENQASM 2.0;\nqreg q[2];\nh q[0];\ncx q[0],q[1];\n");
     let _ = fs.write(b"quantum/ghz.qasm", b"OPENQASM 2.0;\nqreg q[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\n");
+    let _ = fs.write(
+        b"quantum/rotate.qasm",
+        b"OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nry(pi/3) q[0];\ncx q[0],q[1];\nrx(pi/2) q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n",
+    );
 }
 
 pub fn list() {
