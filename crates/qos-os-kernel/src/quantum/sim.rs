@@ -316,10 +316,14 @@ impl Simulator {
     }
 }
 
+/// Total simulator jobs executed since boot (surfaced by the Process viewer / System Monitor).
+pub static SIM_JOBS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 /// High-level function: parse and run QASM2
 pub fn run_qasm2(qasm: &[u8], shots: u64) -> Result<SimResult, super::parser::ParseError> {
     let program = super::parser::parse_qasm2(qasm)?;
     let mut sim = Simulator::new(program.n_qubits);
+    SIM_JOBS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(sim.run(&program, shots))
 }
 

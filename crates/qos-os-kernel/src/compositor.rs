@@ -38,15 +38,21 @@ enum AppKind {
     Quantum,
     Monitor,
     Settings,
+    Calculator,
+    Devices,
+    Processes,
 }
 
-const APPS: [AppKind; 6] = [
+const APPS: [AppKind; 9] = [
     AppKind::Terminal,
     AppKind::Files,
     AppKind::Editor,
     AppKind::Quantum,
     AppKind::Monitor,
     AppKind::Settings,
+    AppKind::Calculator,
+    AppKind::Devices,
+    AppKind::Processes,
 ];
 
 fn app_title(k: AppKind) -> &'static str {
@@ -57,19 +63,9 @@ fn app_title(k: AppKind) -> &'static str {
         AppKind::Quantum => "Quantum Lab",
         AppKind::Monitor => "System Monitor",
         AppKind::Settings => "Settings",
-    }
-}
-
-/// A distinct single-letter glyph for the dock icon (title initials collide: both System Monitor
-/// and Settings start with "S").
-fn app_dock_letter(k: AppKind) -> &'static str {
-    match k {
-        AppKind::Terminal => "T",
-        AppKind::Files => "F",
-        AppKind::Editor => "E",
-        AppKind::Quantum => "Q",
-        AppKind::Monitor => "M",
-        AppKind::Settings => "S",
+        AppKind::Calculator => "Calculator",
+        AppKind::Devices => "Devices",
+        AppKind::Processes => "Processes",
     }
 }
 
@@ -81,12 +77,95 @@ fn app_tint(k: AppKind, theme: &Theme) -> qos_ui::Rgb {
         AppKind::Quantum => qos_ui::rgb(0x8a, 0x5c, 0xd8),
         AppKind::Monitor => qos_ui::rgb(0x27, 0xa8, 0xc8),
         AppKind::Settings => qos_ui::rgb(0xe0, 0x7a, 0x2a),
+        AppKind::Calculator => qos_ui::rgb(0x50, 0x60, 0xd8),
+        AppKind::Devices => qos_ui::rgb(0x9a, 0x8a, 0x40),
+        AppKind::Processes => qos_ui::rgb(0xc8, 0x40, 0x70),
     }
 }
 
 /// A filled circle via a maximally-rounded square (used for the macOS-style window dots + dock).
 fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
     s.rounded_rect(Rect::new(cx - d / 2, cy - d / 2, d, d), d / 2, color);
+}
+
+/// Draw a real (vector-drawn) app icon glyph inside `r` (the tinted tile). All glyphs are built
+/// from the AA primitives (rects + circles) so they stay crisp at any tile size — no bitmaps.
+fn draw_app_icon(s: &mut Surface, kind: AppKind, r: Rect, tint: qos_ui::Rgb) {
+    let white = qos_ui::rgb(0xff, 0xff, 0xff);
+    let faint = qos_ui::rgb(0xe8, 0xec, 0xf4);
+    let (cx, cy) = (r.x + r.w / 2, r.y + r.h / 2);
+    let u = r.w / 12; // icon unit
+    match kind {
+        AppKind::Terminal => {
+            // Dark screen + green prompt line and block cursor.
+            s.rounded_rect(Rect::new(r.x + 2 * u, r.y + 3 * u, 8 * u, 6 * u), u, qos_ui::rgb(0x10, 0x12, 0x18));
+            let green = qos_ui::rgb(0x6e, 0xe0, 0x7a);
+            s.fill_rect(Rect::new(r.x + 3 * u, cy - u / 4, 2 * u, u / 2), green);
+            s.fill_rect(Rect::new(r.x + 6 * u, cy - u / 4, u, u), green);
+        }
+        AppKind::Files => {
+            // Folder: tab + body.
+            s.rounded_rect(Rect::new(r.x + 2 * u, r.y + 3 * u, 4 * u, 2 * u), u / 2, faint);
+            s.rounded_rect(Rect::new(r.x + 2 * u, r.y + 4 * u, 8 * u, 5 * u), u / 2, white);
+        }
+        AppKind::Editor => {
+            // Document sheet + text lines.
+            s.rounded_rect(Rect::new(cx - 3 * u, r.y + 2 * u, 6 * u, 8 * u), u / 2, white);
+            for i in 0..3 {
+                s.fill_rect(Rect::new(cx - 2 * u, r.y + 4 * u + i * u + i * u / 2, 4 * u, u / 2), tint);
+            }
+        }
+        AppKind::Quantum => {
+            // Atom: ring (white circle with a tint punch-out) + nucleus + electron.
+            circle(s, cx, cy, 9 * u, white);
+            circle(s, cx, cy, 7 * u, tint);
+            circle(s, cx, cy, 3 * u, white);
+            circle(s, cx + 4 * u, cy - 3 * u, u * 2, white);
+        }
+        AppKind::Monitor => {
+            // Bar chart.
+            let heights = [3, 6, 4, 7];
+            for (i, h) in heights.iter().enumerate() {
+                let bh = *h * u;
+                s.rounded_rect(Rect::new(r.x + 2 * u + i as i32 * 2 * u, r.y + 9 * u - bh, u + u / 2, bh), u / 3, white);
+            }
+        }
+        AppKind::Settings => {
+            // GNOME-style sliders: three tracks with offset knobs.
+            for (i, kx) in [3, 7, 5].iter().enumerate() {
+                let ly = r.y + (3 + i as i32 * 2 + i as i32 / 2) * u + u / 2;
+                s.rounded_rect(Rect::new(r.x + 2 * u, ly, 8 * u, u / 2), u / 4, faint);
+                circle(s, r.x + *kx * u, ly + u / 4, u * 2, white);
+            }
+        }
+        AppKind::Calculator => {
+            // Display bar + key dots.
+            s.rounded_rect(Rect::new(r.x + 2 * u, r.y + 2 * u, 8 * u, 2 * u), u / 2, white);
+            for row in 0..2 {
+                for col in 0..3 {
+                    circle(s, r.x + 3 * u + col * 3 * u, r.y + 6 * u + row * 3 * u, u + u / 2, faint);
+                }
+            }
+        }
+        AppKind::Devices => {
+            // Chip: outlined die + pins.
+            s.rounded_rect(Rect::new(cx - 3 * u, cy - 3 * u, 6 * u, 6 * u), u / 2, white);
+            s.rounded_rect(Rect::new(cx - 2 * u, cy - 2 * u, 4 * u, 4 * u), u / 3, tint);
+            for i in 0..3 {
+                let px = cx - 2 * u + i * 2 * u;
+                s.fill_rect(Rect::new(px, cy - 4 * u - u / 2, u / 2, u + u / 2), white);
+                s.fill_rect(Rect::new(px, cy + 3 * u, u / 2, u + u / 2), white);
+            }
+        }
+        AppKind::Processes => {
+            // Task list: bullet + line rows.
+            for i in 0..3 {
+                let ly = r.y + 3 * u + i * 2 * u + i * u / 2;
+                circle(s, r.x + 3 * u, ly + u / 2, u + u / 4, white);
+                s.rounded_rect(Rect::new(r.x + 5 * u, ly + u / 4, 5 * u, u / 2), u / 4, faint);
+            }
+        }
+    }
 }
 
 // Per-app clickable geometry, shared by drawing + hit-testing so they stay in sync (`win` = window
@@ -110,8 +189,10 @@ fn files_name_box(win: Rect) -> Rect {
 fn qlab_btn_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 24 + i as i32 * 150, win.y + HEADER_H + 108, 132, 40)
 }
-fn settings_theme_rect(win: Rect) -> Rect {
-    Rect::new(win.x + 24, win.y + HEADER_H + 30, 220, 36)
+/// The two Appearance theme cards (0 = Dark, 1 = Light) in the Settings window.
+fn settings_card_rect(win: Rect, i: usize) -> Rect {
+    let cw = (win.w - 48 - 16) / 2;
+    Rect::new(win.x + 24 + i as i32 * (cw + 16), win.y + HEADER_H + 42, cw, 86)
 }
 /// Text Editor action buttons (Save / New).
 fn editor_btn_rect(win: Rect, i: usize) -> Rect {
@@ -119,10 +200,36 @@ fn editor_btn_rect(win: Rect, i: usize) -> Rect {
 }
 const FILES_MAX_ROWS: usize = 5;
 
+/// Calculator display field + button grid + Clear (shared by drawing and hit-testing).
+fn calc_display_rect(win: Rect) -> Rect {
+    Rect::new(win.x + 24, win.y + HEADER_H + 16, win.w - 48, 44)
+}
+fn calc_btn_rect(win: Rect, i: usize) -> Rect {
+    let (row, col) = (i as i32 / 4, i as i32 % 4);
+    let gap = 10;
+    let bw = (win.w - 48 - 3 * gap) / 4;
+    let bh = 52;
+    Rect::new(win.x + 24 + col * (bw + gap), win.y + HEADER_H + 76 + row * (bh + gap), bw, bh)
+}
+fn calc_clear_rect(win: Rect) -> Rect {
+    let g = calc_btn_rect(win, 12); // row 3 for vertical placement
+    Rect::new(win.x + 24, g.bottom() + 10, win.w - 48, 34)
+}
+
 /// An open window on the desktop.
 struct Win {
     rect: Rect,
     kind: AppKind,
+    /// Hidden from the desktop (yellow dot); restored via its dock icon.
+    minimized: bool,
+    /// The pre-maximize rect while maximized (green dot toggles).
+    saved: Option<Rect>,
+}
+
+impl Win {
+    fn new(rect: Rect, kind: AppKind) -> Self {
+        Win { rect, kind, minimized: false, saved: None }
+    }
 }
 
 /// Which kind of name the Files naming modal is collecting.
@@ -131,6 +238,94 @@ enum NameMode {
     NewFile,
     NewDir,
     Rename,
+}
+
+/// Calculator button grid (4×4) + a wide Clear; shared by drawing and hit-testing.
+const CALC_BTNS: [&str; 16] = [
+    "7", "8", "9", "/", "4", "5", "6", "*", "1", "2", "3", "-", "0", ".", "=", "+",
+];
+
+/// A standard immediate-execution calculator.
+struct Calc {
+    display: String,
+    acc: f64,
+    pending: Option<char>,
+    /// The next digit starts a fresh number (after an operator or `=`).
+    reset_next: bool,
+}
+
+impl Calc {
+    fn new() -> Self {
+        Calc { display: "0".to_string(), acc: 0.0, pending: None, reset_next: true }
+    }
+
+    fn value(&self) -> f64 {
+        self.display.parse::<f64>().unwrap_or(0.0)
+    }
+
+    /// Format a result: integers without a fraction, everything else trimmed to 6 decimals.
+    fn fmt(v: f64) -> String {
+        if v.is_nan() || v.is_infinite() {
+            return "error".to_string();
+        }
+        if v == (v as i64) as f64 && v.abs() < 1e15 {
+            return format!("{}", v as i64);
+        }
+        let s = format!("{:.6}", v);
+        s.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
+
+    fn apply_pending(&mut self) {
+        let v = self.value();
+        if let Some(op) = self.pending {
+            self.acc = match op {
+                '+' => self.acc + v,
+                '-' => self.acc - v,
+                '*' => self.acc * v,
+                '/' => self.acc / v,
+                _ => v,
+            };
+        } else {
+            self.acc = v;
+        }
+        self.display = Self::fmt(self.acc);
+    }
+
+    /// Feed one input character (digit, '.', operator, '=' or 'C').
+    fn input(&mut self, c: char) {
+        match c {
+            '0'..='9' => {
+                if self.reset_next || self.display == "0" {
+                    self.display.clear();
+                    self.reset_next = false;
+                }
+                if self.display.len() < 15 {
+                    self.display.push(c);
+                }
+            }
+            '.' => {
+                if self.reset_next {
+                    self.display = "0".to_string();
+                    self.reset_next = false;
+                }
+                if !self.display.contains('.') {
+                    self.display.push('.');
+                }
+            }
+            '+' | '-' | '*' | '/' => {
+                self.apply_pending();
+                self.pending = Some(c);
+                self.reset_next = true;
+            }
+            '=' => {
+                self.apply_pending();
+                self.pending = None;
+                self.reset_next = true;
+            }
+            'C' | 'c' => *self = Calc::new(),
+            _ => {}
+        }
+    }
 }
 
 /// Translate a PS/2 Set-1 make scancode to a character (honoring shift). `None` for non-text keys.
@@ -539,6 +734,10 @@ struct Desktop {
     editor_path: Option<String>,
     editor_buf: String,
     editor_status: String,
+    /// Calculator state.
+    calc: Calc,
+    /// Files: scroll offset into the listing (rows above it are hidden).
+    files_scroll: usize,
 }
 
 /// Margin around a window rect that its shadow extends into (for damage rects).
@@ -548,8 +747,8 @@ impl Desktop {
     fn new(w: i32, h: i32) -> Self {
         // Start with two cascaded windows so the desktop looks alive.
         let wins = vec![
-            Win { rect: Rect::new(w / 2 - 440, 74, 540, 440), kind: AppKind::Terminal },
-            Win { rect: Rect::new(w / 2 - 40, 230, 520, 440), kind: AppKind::Files },
+            Win::new(Rect::new(w / 2 - 440, 74, 540, 440), AppKind::Terminal),
+            Win::new(Rect::new(w / 2 - 40, 230, 520, 440), AppKind::Files),
         ];
         Desktop {
             w,
@@ -573,6 +772,8 @@ impl Desktop {
             editor_path: None,
             editor_buf: String::new(),
             editor_status: "no file open — open one from Files".to_string(),
+            calc: Calc::new(),
+            files_scroll: 0,
         }
     }
 
@@ -621,8 +822,9 @@ impl Desktop {
                     }
                 }
                 let list = self.files_list();
-                for (i, (name, is_dir, _)) in list.iter().enumerate().take(FILES_MAX_ROWS) {
-                    if files_row_rect(wr, i).contains(cx, cy) {
+                let scroll = self.files_scroll.min(list.len());
+                for (v, (name, is_dir, _)) in list.iter().skip(scroll).take(FILES_MAX_ROWS).enumerate() {
+                    if files_row_rect(wr, v).contains(cx, cy) {
                         let (n, d) = (name.clone(), *is_dir);
                         self.files_click(&n, d);
                         return;
@@ -651,12 +853,32 @@ impl Desktop {
                 }
             }
             AppKind::Settings => {
-                if settings_theme_rect(wr).contains(cx, cy) {
-                    self.theme = self.theme.toggled();
-                    self.mark_full();
+                for i in 0..2 {
+                    if settings_card_rect(wr, i).contains(cx, cy) {
+                        let want_dark = i == 0;
+                        if self.theme.is_dark != want_dark {
+                            self.theme = self.theme.toggled();
+                            self.mark_full();
+                        }
+                        return;
+                    }
                 }
             }
-            AppKind::Terminal | AppKind::Monitor => {}
+            AppKind::Calculator => {
+                for (i, label) in CALC_BTNS.iter().enumerate() {
+                    if calc_btn_rect(wr, i).contains(cx, cy) {
+                        let c = label.chars().next().unwrap_or(' ');
+                        self.calc.input(c);
+                        self.mark_top_window();
+                        return;
+                    }
+                }
+                if calc_clear_rect(wr).contains(cx, cy) {
+                    self.calc.input('C');
+                    self.mark_top_window();
+                }
+            }
+            AppKind::Terminal | AppKind::Monitor | AppKind::Devices | AppKind::Processes => {}
         }
     }
 
@@ -678,6 +900,7 @@ impl Desktop {
                 self.files_on_disk = false;
                 self.files_preview = None;
                 self.files_sel = None;
+                self.files_scroll = 0;
             } else {
                 // Select + preview a disk file.
                 self.files_sel = Some(name.to_string());
@@ -704,11 +927,13 @@ impl Desktop {
             }
             self.files_preview = None;
             self.files_sel = None;
+            self.files_scroll = 0;
         } else if name == Self::DISK_ENTRY && self.files_cwd.is_empty() {
             // Enter the persistent-disk location.
             self.files_on_disk = true;
             self.files_preview = None;
             self.files_sel = None;
+            self.files_scroll = 0;
             if !crate::diskfs::is_formatted() {
                 self.files_status = "disk unformatted — run dformat in the Terminal".to_string();
             } else {
@@ -724,6 +949,7 @@ impl Desktop {
             self.files_cwd.push_str(name);
             self.files_preview = None;
             self.files_sel = None;
+            self.files_scroll = 0;
         } else {
             // Select the file and preview its text.
             self.files_sel = Some(name.to_string());
@@ -742,21 +968,21 @@ impl Desktop {
         self.mark_full();
     }
 
-    /// Keyboard navigation: move the Files selection up/down through the visible rows.
+    /// Keyboard navigation: move the Files selection up/down through the whole listing, scrolling
+    /// the visible window (`files_scroll`) to keep the selection on screen.
     fn files_nav(&mut self, down: bool) {
         let list = self.files_list();
-        let visible = list.len().min(FILES_MAX_ROWS);
-        if visible == 0 {
+        if list.is_empty() {
             return;
         }
         let cur = self
             .files_sel
             .as_deref()
-            .and_then(|s| list[..visible].iter().position(|(n, _, _)| n == s));
+            .and_then(|s| list.iter().position(|(n, _, _)| n == s));
         let idx = match cur {
             Some(i) => {
                 if down {
-                    (i + 1).min(visible - 1)
+                    (i + 1).min(list.len() - 1)
                 } else {
                     i.saturating_sub(1)
                 }
@@ -764,6 +990,12 @@ impl Desktop {
             None => 0,
         };
         self.files_sel = Some(list[idx].0.clone());
+        // Follow with the scroll window.
+        if idx < self.files_scroll {
+            self.files_scroll = idx;
+        } else if idx >= self.files_scroll + FILES_MAX_ROWS {
+            self.files_scroll = idx + 1 - FILES_MAX_ROWS;
+        }
         self.mark_top_window();
     }
 
@@ -1024,25 +1256,36 @@ impl Desktop {
         self.mark_full();
     }
 
-    /// True if the focused (topmost) window is the Terminal — then typed keys go to it.
-    fn top_is_terminal(&self) -> bool {
-        self.wins.last().map_or(false, |w| w.kind == AppKind::Terminal)
+    /// The focused window: the topmost one, unless it is minimized (then nothing has focus).
+    fn focused(&self) -> Option<&Win> {
+        self.wins.last().filter(|w| !w.minimized)
     }
 
-    /// True if the focused window is the System Monitor — used to refresh it live.
-    fn top_is_monitor(&self) -> bool {
-        self.wins.last().map_or(false, |w| w.kind == AppKind::Monitor)
+    /// True if the focused (topmost) window is the Terminal — then typed keys go to it.
+    fn top_is_terminal(&self) -> bool {
+        self.focused().map_or(false, |w| w.kind == AppKind::Terminal)
     }
 
     /// True if the focused window is the Text Editor — then typed keys edit its buffer.
     fn top_is_editor(&self) -> bool {
-        self.wins.last().map_or(false, |w| w.kind == AppKind::Editor)
+        self.focused().map_or(false, |w| w.kind == AppKind::Editor)
+    }
+
+    /// True if the focused window is the Calculator — then digits/operators go to it.
+    fn top_is_calc(&self) -> bool {
+        self.focused().map_or(false, |w| w.kind == AppKind::Calculator)
+    }
+
+    /// True if the focused window shows live data (System Monitor / Processes) — refreshed ~1 Hz.
+    fn top_is_live(&self) -> bool {
+        self.focused()
+            .map_or(false, |w| matches!(w.kind, AppKind::Monitor | AppKind::Processes))
     }
 
     /// True while the Files naming modal is open and the focused window is Files — then typed keys
     /// go to the name buffer.
     fn files_naming_active(&self) -> bool {
-        self.files_naming.is_some() && self.wins.last().map_or(false, |w| w.kind == AppKind::Files)
+        self.files_naming.is_some() && self.focused().map_or(false, |w| w.kind == AppKind::Files)
     }
 
     /// Mark just the focused window's footprint (plus shadow) dirty — used for terminal typing so a
@@ -1091,12 +1334,28 @@ impl Desktop {
     // ---- app/window management ----
     fn open_app(&mut self, kind: AppKind) {
         if let Some(i) = self.wins.iter().position(|w| w.kind == kind) {
-            let win = self.wins.remove(i);
+            let mut win = self.wins.remove(i);
+            win.minimized = false; // restore if it was minimized
             self.wins.push(win); // raise
         } else {
             let n = self.wins.len() as i32;
             let rect = Rect::new((self.w / 2 - 270 + n * 28).max(20), (80 + n * 24).min(self.h - 460), 540, 440);
-            self.wins.push(Win { rect, kind });
+            self.wins.push(Win::new(rect, kind));
+        }
+        self.mark_full();
+    }
+
+    /// Toggle maximize for window `i`: fill the workspace (between the top bar and the dock), or
+    /// restore the saved rect.
+    fn toggle_maximize(&mut self, i: usize) {
+        let dock_top = self.dock_rect().y;
+        let win = &mut self.wins[i];
+        match win.saved.take() {
+            Some(prev) => win.rect = prev,
+            None => {
+                win.saved = Some(win.rect);
+                win.rect = Rect::new(12, BAR_H + 10, self.w - 24, dock_top - BAR_H - 20);
+            }
         }
         self.mark_full();
     }
@@ -1128,13 +1387,33 @@ impl Desktop {
             self.mark_full();
             return;
         }
-        // Windows, top-most first.
+        // Windows, top-most first (minimized ones are not on screen — skip them).
         for i in (0..self.wins.len()).rev() {
+            if self.wins[i].minimized {
+                continue;
+            }
             let r = self.wins[i].rect;
             let (dxc, dyc) = self.close_dot(&r);
-            if (cx - dxc).abs() <= 9 && (cy - dyc).abs() <= 9 {
-                self.wins.remove(i); // close
+            let dy_ok = (cy - dyc).abs() <= 9;
+            if dy_ok && (cx - dxc).abs() <= 9 {
+                self.wins.remove(i); // red → close
                 self.mark_full();
+                return;
+            }
+            if dy_ok && (cx - (r.x + 44)).abs() <= 9 {
+                // Yellow → minimize: hide and sink to the bottom of the z-order so the topmost
+                // window stays a visible one.
+                let mut win = self.wins.remove(i);
+                win.minimized = true;
+                self.wins.insert(0, win);
+                self.mark_full();
+                return;
+            }
+            if dy_ok && (cx - (r.x + 66)).abs() <= 9 {
+                // Green → maximize/restore (and raise).
+                let win = self.wins.remove(i);
+                self.wins.push(win);
+                self.toggle_maximize(self.wins.len() - 1);
                 return;
             }
             if r.contains(cx, cy) {
@@ -1191,6 +1470,11 @@ impl Desktop {
         circle(s, r.x + 66, cy, 14, qos_ui::rgb(0x28, 0xc8, 0x40));
         let title = app_title(kind);
         let tw = fr.text_width(title, 18.0);
+        // Mini app icon to the left of the centered title (real-OS touch).
+        let mini = Rect::new(r.x + (r.w - tw) / 2 - 26, cy - 10, 20, 20);
+        let tint = app_tint(kind, theme);
+        s.rounded_rect(mini, 5, tint);
+        draw_app_icon(s, kind, mini, tint);
         fr.draw_text(s, r.x + (r.w - tw) / 2, cy + 6, title, 18.0, theme.text);
         // Body content (light stubs; full apps are step 5).
         let bx = r.x + 22;
@@ -1236,10 +1520,11 @@ impl Desktop {
                     let lw = fr.text_width(label, 12.0);
                     fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 17, label, 12.0, theme.text);
                 }
-                // Directory entries (selected row highlighted with the accent).
+                // Directory entries (selected row highlighted with the accent), scrolled window.
                 let list = self.files_list();
-                for (i, (name, is_dir, size)) in list.iter().take(FILES_MAX_ROWS).enumerate() {
-                    let rr = files_row_rect(r, i);
+                let scroll = self.files_scroll.min(list.len());
+                for (v, (name, is_dir, size)) in list.iter().skip(scroll).take(FILES_MAX_ROWS).enumerate() {
+                    let rr = files_row_rect(r, v);
                     let selected = self.files_sel.as_deref() == Some(name.as_str());
                     s.rounded_rect(rr, 6, if selected { theme.accent } else { theme.surface_alt });
                     let txt = if selected { theme.on_accent } else { theme.text };
@@ -1253,8 +1538,16 @@ impl Desktop {
                         fr.draw_text(s, rr.right() - sw - 12, rr.y + 17, &sz, 12.0, dim);
                     }
                 }
+                // Scroll indicator when entries are hidden above/below.
+                if list.len() > FILES_MAX_ROWS {
+                    let hidden_above = scroll;
+                    let hidden_below = list.len().saturating_sub(scroll + FILES_MAX_ROWS);
+                    let ind = format!("{} above · {} below (Up/Down scrolls)", hidden_above, hidden_below);
+                    let iw = fr.text_width(&ind, 11.0);
+                    fr.draw_text(s, r.right() - iw - 16, files_row_rect(r, FILES_MAX_ROWS).y + 4, &ind, 11.0, theme.text_dim);
+                }
                 // Status line + preview, below the rows.
-                let rows = list.len().min(FILES_MAX_ROWS);
+                let rows = (list.len() - scroll).min(FILES_MAX_ROWS);
                 let py = files_row_rect(r, rows).y + 6;
                 if !self.files_status.is_empty() {
                     fr.draw_text(s, r.x + 16, py + 4, &self.files_status, 12.0, theme.text_dim);
@@ -1390,17 +1683,148 @@ impl Desktop {
                 fr.draw_text(s, bx + 8, y, &disk_line, 14.0, theme.text_dim);
             }
             AppKind::Settings => {
-                fr.draw_text(s, bx, by, "Appearance", 16.0, theme.text);
-                let tr = settings_theme_rect(r);
-                s.rounded_rect(tr, 9, theme.surface_alt);
-                let label = if theme.is_dark { "Theme:  Dark   (click)" } else { "Theme:  Light   (click)" };
-                fr.draw_text(s, tr.x + 14, tr.y + 24, label, 14.0, theme.text);
-                fr.draw_text(s, bx, tr.bottom() + 40, "System", 16.0, theme.text);
+                // Appearance: two clickable theme cards with a live mini-preview.
+                fr.draw_text(s, bx, by, "Appearance", 15.0, theme.accent);
+                for (i, name) in ["Dark", "Light"].iter().enumerate() {
+                    let card = settings_card_rect(r, i);
+                    let selected = theme.is_dark == (i == 0);
+                    if selected {
+                        s.rounded_rect(card.inflate(3), 12, theme.accent);
+                    }
+                    let (bg, fg, alt) = if i == 0 {
+                        (qos_ui::rgb(0x1a, 0x1d, 0x26), qos_ui::rgb(0xe6, 0xea, 0xf2), qos_ui::rgb(0x2a, 0x2e, 0x3a))
+                    } else {
+                        (qos_ui::rgb(0xf2, 0xf3, 0xf7), qos_ui::rgb(0x20, 0x24, 0x2e), qos_ui::rgb(0xdd, 0xe0, 0xe8))
+                    };
+                    s.rounded_rect(card, 10, bg);
+                    // Mini window preview inside the card.
+                    s.rounded_rect(Rect::new(card.x + 14, card.y + 14, card.w - 28, 34), 6, alt);
+                    s.fill_rect(Rect::new(card.x + 20, card.y + 24, card.w - 60, 4), fg);
+                    s.fill_rect(Rect::new(card.x + 20, card.y + 34, card.w - 84, 4), fg);
+                    let nw = fr.text_width(name, 14.0);
+                    fr.draw_text(s, card.x + (card.w - nw) / 2, card.bottom() - 12, name, 14.0, fg);
+                }
+                // Info sections: real Display / Input / Storage / About rows.
+                let mut y = settings_card_rect(r, 0).bottom() + 34;
+                let (kbd, mice) = crate::xhci::hid_device_counts();
+                let (used, total) = crate::allocator::heap_stats();
                 let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-                let info1 = format!("QOS 0.1    {}x{}    heap {} MiB", self.w, self.h, crate::allocator::HEAP_SIZE / 1024 / 1024);
-                let info2 = format!("uptime {} s    USB keyboard + mouse", ticks / 100);
-                fr.draw_text(s, bx, tr.bottom() + 72, &info1, 14.0, theme.text_dim);
-                fr.draw_text(s, bx, tr.bottom() + 94, &info2, 14.0, theme.text_dim);
+                let disk = if crate::ahci::present() {
+                    let mib = crate::ahci::capacity_sectors() * 512 / 1024 / 1024;
+                    format!("SATA {} MiB — {}", mib, if crate::diskfs::is_formatted() { "QOSFS" } else { "unformatted" })
+                } else {
+                    "no disk attached".to_string()
+                };
+                let rows: [(&str, String); 4] = [
+                    ("Display", format!("{} x {}  ·  32-bit true color  ·  UEFI framebuffer", self.w, self.h)),
+                    ("Input", format!("{} USB keyboard(s), {} USB mouse/mice  ·  MSI-X", kbd, mice)),
+                    ("Storage", disk),
+                    ("About", format!("QOS 0.1 — Heptapus Group  ·  heap {}/{} MiB  ·  up {} s", used / 1024 / 1024, total / 1024 / 1024, ticks / 100)),
+                ];
+                for (label, value) in rows.iter() {
+                    let row = Rect::new(r.x + 24, y, r.w - 48, 34);
+                    s.rounded_rect(row, 8, theme.surface_alt);
+                    fr.draw_text(s, row.x + 12, row.y + 22, label, 13.0, theme.accent);
+                    fr.draw_text(s, row.x + 96, row.y + 22, value, 12.0, theme.text);
+                    y += 40;
+                }
+            }
+            AppKind::Calculator => {
+                // Display.
+                let dr = calc_display_rect(r);
+                s.rounded_rect(dr, 8, qos_ui::rgb(0x12, 0x14, 0x1a));
+                let dtxt = &self.calc.display;
+                let dw = fr.text_width(dtxt, 24.0);
+                fr.draw_text(s, dr.right() - dw - 14, dr.y + 31, dtxt, 24.0, qos_ui::rgb(0xd8, 0xdc, 0xe4));
+                if let Some(op) = self.calc.pending {
+                    let mut b = [0u8; 4];
+                    fr.draw_text(s, dr.x + 12, dr.y + 31, op.encode_utf8(&mut b), 18.0, theme.accent);
+                }
+                // Button grid.
+                for (i, label) in CALC_BTNS.iter().enumerate() {
+                    let b = calc_btn_rect(r, i);
+                    let is_op = matches!(*label, "/" | "*" | "-" | "+" | "=");
+                    s.rounded_rect(b, 10, if is_op { theme.accent } else { theme.surface_alt });
+                    let col = if is_op { theme.on_accent } else { theme.text };
+                    let lw = fr.text_width(label, 20.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + b.h / 2 + 8, label, 20.0, col);
+                }
+                let cb = calc_clear_rect(r);
+                s.rounded_rect(cb, 8, theme.surface_alt);
+                let cl = "Clear";
+                let cw = fr.text_width(cl, 14.0);
+                fr.draw_text(s, cb.x + (cb.w - cw) / 2, cb.y + 23, cl, 14.0, theme.text);
+            }
+            AppKind::Devices => {
+                // Real hardware inventory: full PCI listing + input / storage / network summary.
+                let mut y = by;
+                let devs = crate::pci::devices();
+                fr.draw_text(s, bx, y, &format!("PCI bus — {} devices", devs.len()), 15.0, theme.accent);
+                y += 22;
+                for d in devs.iter().take(9) {
+                    let line = format!(
+                        "{:02x}:{:02x}.{}  {:04x}:{:04x}  {}  {}",
+                        d.bus, d.device, d.function, d.vendor_id, d.device_id,
+                        crate::pci::vendor_name(d.vendor_id), d.class_name()
+                    );
+                    fr.draw_text(s, bx + 8, y, &line, 12.0, theme.text_dim);
+                    y += 17;
+                }
+                y += 10;
+                let (kbd, mice) = crate::xhci::hid_device_counts();
+                fr.draw_text(s, bx, y, "Input (USB HID)", 15.0, theme.accent);
+                y += 20;
+                fr.draw_text(s, bx + 8, y, &format!("{} keyboard(s), {} mouse/mice — xHCI, MSI-X interrupts", kbd, mice), 13.0, theme.text);
+                y += 26;
+                fr.draw_text(s, bx, y, "Storage (AHCI/SATA)", 15.0, theme.accent);
+                y += 20;
+                let st = if crate::ahci::present() {
+                    let mib = crate::ahci::capacity_sectors() * 512 / 1024 / 1024;
+                    format!("{} MiB data disk — {}", mib, if crate::diskfs::is_formatted() { "QOSFS" } else { "unformatted" })
+                } else {
+                    "no SATA disk attached".to_string()
+                };
+                fr.draw_text(s, bx + 8, y, &st, 13.0, theme.text);
+                y += 26;
+                fr.draw_text(s, bx, y, "Network", 15.0, theme.accent);
+                y += 20;
+                let net = devs.iter().find(|d| d.class_code == 0x02);
+                let nline = match net {
+                    Some(d) => format!("{:04x}:{:04x} {} (no driver yet)", d.vendor_id, d.device_id, crate::pci::vendor_name(d.vendor_id)),
+                    None => "no network device".to_string(),
+                };
+                fr.draw_text(s, bx + 8, y, &nline, 13.0, theme.text);
+            }
+            AppKind::Processes => {
+                // Real runtime state: open UI apps (windows) + live kernel subsystem activity.
+                let mut y = by;
+                fr.draw_text(s, bx, y, &format!("Apps — {} window(s)", self.wins.len()), 15.0, theme.accent);
+                y += 22;
+                let top = self.wins.len().saturating_sub(1);
+                for (i, win) in self.wins.iter().enumerate() {
+                    let state = if i == top { "focused" } else { "running" };
+                    fr.draw_text(s, bx + 8, y, &format!("{}  —  {}", app_title(win.kind), state), 13.0,
+                        if i == top { theme.text } else { theme.text_dim });
+                    y += 18;
+                }
+                y += 10;
+                fr.draw_text(s, bx, y, "Kernel subsystems", 15.0, theme.accent);
+                y += 22;
+                let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                let (used, total) = crate::allocator::heap_stats();
+                let jobs = crate::quantum::sim::SIM_JOBS.load(core::sync::atomic::Ordering::Relaxed);
+                let (kbd, mice) = crate::xhci::hid_device_counts();
+                let rows = [
+                    format!("timer/APIC     100 Hz — {} ticks (uptime {} s)", ticks, ticks / 100),
+                    format!("memory         heap {} KiB / {} MiB", used / 1024, total / 1024 / 1024),
+                    format!("usb/xhci       {} kbd, {} mouse — interrupt-driven", kbd, mice),
+                    format!("storage/ahci   {}", if crate::ahci::present() { "SATA data disk online" } else { "no disk" }),
+                    format!("quantum/sim    {} job(s) executed since boot", jobs),
+                ];
+                for line in rows.iter() {
+                    fr.draw_text(s, bx + 8, y, line, 13.0, theme.text);
+                    y += 19;
+                }
             }
         }
     }
@@ -1424,14 +1848,19 @@ impl Desktop {
         let tlabel = if theme.is_dark { "Dark" } else { "Light" };
         let tw = fr.text_width(tlabel, 13.0);
         fr.draw_text(s, tb.x + (tb.w - tw) / 2, tb.y + 16, tlabel, 13.0, theme.text);
-        let clock = "12:42";
-        let cw = fr.text_width(clock, 15.0);
-        fr.draw_text(s, w - cw - 16, 21, clock, 15.0, theme.text);
+        // Real RTC clock (24-hour, refreshed each minute by the main loop).
+        let dt = crate::rtc::read_datetime();
+        let clock = format!("{:02}:{:02}", dt.hour, dt.minute);
+        let cw = fr.text_width(&clock, 15.0);
+        fr.draw_text(s, w - cw - 16, 21, &clock, 15.0, theme.text);
 
-        // Windows in z-order (topmost last = focused).
-        let top = self.wins.len().saturating_sub(1);
+        // Windows in z-order (topmost non-minimized = focused; minimized ones are hidden).
+        let top = self.wins.iter().rposition(|w| !w.minimized);
         for i in 0..self.wins.len() {
-            self.draw_window(s, fr, i, i == top);
+            if self.wins[i].minimized {
+                continue;
+            }
+            self.draw_window(s, fr, i, Some(i) == top);
         }
 
         // Dock with app icons (open apps get an accent underline dot).
@@ -1440,10 +1869,9 @@ impl Desktop {
         s.rounded_rect_blend(dock, 20, theme.dock, 238);
         for (i, &kind) in APPS.iter().enumerate() {
             let ir = self.dock_icon_rect(i as i32);
-            s.rounded_rect(ir, 12, app_tint(kind, theme));
-            let initial = app_dock_letter(kind);
-            let iw = fr.text_width(initial, 22.0);
-            fr.draw_text(s, ir.x + (ir.w - iw) / 2, ir.y + ir.h / 2 + 8, initial, 22.0, qos_ui::rgb(0xff, 0xff, 0xff));
+            let tint = app_tint(kind, theme);
+            s.rounded_rect(ir, 12, tint);
+            draw_app_icon(s, kind, ir, tint);
             if self.wins.iter().any(|win| win.kind == kind) {
                 circle(s, ir.x + ir.w / 2, ir.y + ir.h + 6, 5, theme.accent);
             }
@@ -1752,6 +2180,7 @@ pub fn run_demo() {
     desk.damage = Rect::new(0, 0, 0, 0);
     let mut shift = false;
     let mut last_refresh = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
+    let mut last_minute = crate::rtc::read_datetime().minute;
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
@@ -1834,6 +2263,31 @@ pub fn run_demo() {
                                 }
                             }
                         }
+                    } else if desk.top_is_calc() {
+                        // Focused Calculator: digits + operators from the keyboard ('w' still
+                        // closes the window so the keyboard never gets trapped).
+                        match scancode {
+                            0x11 => {
+                                desk.wins.pop();
+                                desk.mark_full();
+                            } // w → close
+                            0x0E => {
+                                desk.calc.input('C');
+                                desk.mark_top_window();
+                            } // Backspace → clear
+                            0x1C => {
+                                desk.calc.input('=');
+                                desk.mark_top_window();
+                            } // Enter → =
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    if matches!(c, '0'..='9' | '.' | '+' | '-' | '*' | '/' | '=' | 'c' | 'C') {
+                                        desk.calc.input(c);
+                                        desk.mark_top_window();
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         // Desktop shortcuts when no text-entry window is focused. When Files is the
                         // focused window, letter keys drive its file-manager operations (a real
@@ -1845,8 +2299,8 @@ pub fn run_demo() {
                                 desk.theme = desk.theme.toggled();
                                 desk.mark_full();
                             } // t
-                            s @ 0x02..=0x07 => {
-                                // Number keys 1–6 open the dock apps in order.
+                            s @ 0x02..=0x0A => {
+                                // Number keys 1–9 open the dock apps in order.
                                 let idx = (s - 0x02) as usize;
                                 if idx < APPS.len() {
                                     desk.open_app(APPS[idx]);
@@ -1880,12 +2334,19 @@ pub fn run_demo() {
                 _ => {}
             }
         }
-        // Live refresh: if the System Monitor is focused, repaint its window ~once a second so its
-        // clock / memory / uptime stay current.
+        // Live refresh (~1 Hz): repaint a focused live-data window (System Monitor / Processes),
+        // and repaint the top bar when the RTC minute rolls over so the menu-bar clock is real.
         let now_ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
-        if desk.top_is_monitor() && now_ticks - last_refresh >= 100 {
+        if now_ticks - last_refresh >= 100 {
             last_refresh = now_ticks;
-            desk.mark_top_window();
+            if desk.top_is_live() {
+                desk.mark_top_window();
+            }
+            let minute = crate::rtc::read_datetime().minute;
+            if minute != last_minute {
+                last_minute = minute;
+                desk.mark_region(Rect::new(0, 0, w as i32, BAR_H));
+            }
         }
 
         if desk.dirty {
