@@ -16,11 +16,17 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-01](WP-01-uefi-boot-and-desktop.md) | UEFI boot repair + framebuffer desktop | E-70 (seed) | ADR-0014 | ✅ done |
 | [WP-02](WP-02-driver-model.md) | Device/driver model | E-01 | ADR-0016 | ✅ done |
 | [WP-03](WP-03-acpi-apic.md) | ACPI + modern APIC interrupts | E-10 | ADR-0015 | ✅ done |
-| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | 🟡 in progress |
+| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | ✅ done |
+| [WP-05](WP-05-modern-ui.md) | Modern UI: compositor, fonts, WM, 10 apps, storage UX | E-70..73 | ADR-0017/0018 | 🟡 in progress |
+| [WP-06](WP-06-quantum-control-plane.md) | Quantum control plane: engine, visual lab, QASM toolchain | E-80 | ADR-0019/0021 | 🟡 in progress |
+| [WP-07](WP-07-quantum-ide.md) | Quantum IDE (VS Code-like environment for circuits) | E-80, E-73 | ADR-0021 | 🟡 in progress |
+| [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | 🔴 not started |
+| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | 🔴 not started |
+| [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | 🔴 not started |
 
 Upcoming (not yet opened as WP files; see the master-plan critical path):
-PCIe ECAM + MSI (E-12) · SMP (E-11) · virtio/NVMe + block/FS (E-24/23/40/41) · modern UI
-compositor (E-70) · quantum transpilation (E-80).
+PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · NVMe (E-23) · sound · power
+management (clean ACPI shutdown/reboot).
 
 ## Gaps & correctness backlog
 
@@ -45,3 +51,19 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
   Blocks cloud-QPU and secure egress. *(open)*
 - **G-08** No real-hardware validation yet (ADR-0014 Stage 4); everything is QEMU+OVMF verified.
   *(open)*
+- **G-09** The desktop runs as one **cooperative** kernel loop — a busy computation freezes
+  input/UI; no preemption. → WP-08 slice 1. *(open)*
+- **G-10** No process isolation on the desktop path: every "app" shares kernel memory and can,
+  by bug, corrupt any other. → WP-08 slice 3 (user-mode processes). *(open)*
+- **G-11** Windows cannot be resized by edge drag (only min/max); no notifications; no wallpaper
+  options. → WP-05 next slices. *(open)*
+- **G-12** `ParseError` (QASM) carries no line/column — compile errors name the kind, not the
+  place. → WP-07 slice 2. *(open)*
+- **G-13** Editors were append/backspace-only (no cursor) — being fixed by WP-07 slice 1 for the
+  IDE; Text Editor adopts the shared core in WP-07 slice 3. *(in progress)*
+- **G-14** Three disjoint filesystems + `disk:` special-casing in apps; no mount tree. → WP-09.
+  *(open)*
+- **G-15** The NIC driver targets E1000 (8086:100e) but q35 exposes e1000e (8086:10d3) — no
+  network at all today. → WP-10 slice 1. *(open)*
+- **G-16** No clean shutdown/reboot path surfaced in the UI (ACPI poweroff exists only as legacy
+  code, see G-01). Fold into a power-management WP. *(open)*
