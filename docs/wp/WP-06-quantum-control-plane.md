@@ -1,6 +1,6 @@
 # WP-06: Quantum control plane — serious engine + visual lab + QASM toolchain
 
-- Status: 🟡 in progress
+- Status: ✅ done (local engine v1 — remote/QHAL scope moved to WP-12)
 - Epic: E-80 (quantum control plane)
 - ADRs: ADR-0019 (in-place statevector engine), ADR-0020 (CPU hardening — shipped together),
   ADR-0021 (in-OS QASM toolchain)
@@ -41,14 +41,17 @@ bars: security, performance, UX/UI quality (user directive 2026-07-02).
   number keys 1–9,0 open all ten apps. Verified in QEMU (0-fault, screenshots): F4/F5/F2 loop
   (Bell 505/495; `draft.qasm` 102 B saved), Lab→Studio GHZ export, Terminal
   `qasm quantum/bell.qasm` → "2 -> 2 gates (0 cancelled), depth 2" + 529/471.
-- [ ] **Next (engine/back-end scope — this WP):** rotation-merge pass (RZ·RZ→RZ); controlled
-  rotations (CRZ/CP); measurement/reset placement in the visual Lab; parser line numbers for
-  compile errors (shared prerequisite with WP-07); noise models; QHAL backend abstraction
-  (MASTERPLAN E-80).
-- **Scope note:** the *editor/IDE* items formerly listed here (real text-editing core with a
-  cursor, file sidebar, live circuit preview, problems panel) moved to **WP-07 (Quantum IDE)**,
-  opened 2026-07-02 on the user's "VS Code-like environment" directive. WP-06 stays 🟡 and
-  continues in parallel — it is done only when the engine roadmap above ships.
+- [x] **Engine v1 finish (commit 9125d8f).** `transpile::merge_rotations` (same-axis adjacent
+  rotations compose by angle sum mod 2π, net-identity drops) + `transpile::optimize`
+  (cancellation + merging to a joint fixpoint) — compile paths report `(N cancelled, M merged)`.
+  **CRZ(θ)/CP(θ)/cu1** in parser + simulator + IDE preview rendering. Parser **line numbers**
+  landed via WP-07 s2. Verified in QEMU: `crz(pi/2)` circuit with two `rz(pi/4)` compiles
+  `4 -> 3 gates (1 merged)` and runs with the analytically correct distribution.
+- **Closed scope note:** this WP delivered the **local** quantum control plane v1: O(2^n) engine,
+  parametric + controlled-parametric gates, optimizer passes, visual Lab, QASM toolchain.
+  Remaining E-80 items — **noise models, QHAL backend abstraction, remote/cloud QPU providers,
+  measurement/reset placement in the visual Lab** — moved to **WP-12 (cloud QPU connectivity)**,
+  which builds on WP-10 networking. Editor/IDE scope shipped as WP-07.
 
 ## Acceptance criteria
 

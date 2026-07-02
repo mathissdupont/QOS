@@ -1,10 +1,11 @@
 # WP-07: Quantum IDE — a VS Code-like environment for quantum circuits
 
-- Status: 🟡 in progress
+- Status: ✅ done (v1; deferred niceties tracked as gap G-17)
 - Epic: E-80 (quantum control plane), E-73 (apps)
 - ADRs: ADR-0021 (in-OS QASM toolchain)
 - Commits: 78ee1ef (slice 1: editing core + sidebar + live preview), a0b3753 (slice 2:
-  line-numbered errors + problems row + jump-to-problem)
+  line-numbered errors + problems row + jump-to-problem), 9125d8f (slices 3+4: shared editor
+  core + token highlighting + templates)
 
 ## Goal
 
@@ -35,10 +36,14 @@ teletype.
   (line-exact; column via average glyph advance — per-glyph metrics later). Verified in QEMU
   (0-fault): broken `cx q[0]` → `(!) line 8: syntax: expected ','` + red gutter 8; F8 after
   wandering → `Ln 8, Col 1`. Harness note: TCG queues keystrokes — settle before screendump.
-- [ ] **Slice 3 — shared editing core.** Factor the editing core out (module or `qos-ui`) and
-  adopt it in the Text Editor; selections + clipboard.
-- [ ] **Slice 4 — IDE affordances.** Per-token syntax highlighting; autocompletion of gate
-  names; snippets (Bell/GHZ/QFT templates); QASM import into the visual Lab (code → circuit).
+- [x] **Slice 3 — shared editing core (9125d8f).** The editing core is factored into module-level
+  `ed_*` helpers (byte-safe insert/delete/split, wrap-aware movement, set/get text) used by BOTH
+  the IDE and the **Text Editor**, which now has the same cursor editing, current-line highlight,
+  caret and `Ln, Col` indicator. *(Deferred → G-17: selections + clipboard.)*
+- [x] **Slice 4 — IDE affordances (9125d8f).** **Per-token syntax highlighting** (keywords teal,
+  gate names purple, numbers/`pi` amber, comments dim) and a **TEMPLATES** sidebar section
+  (Bell, GHZ-3, CRZ demo — the CRZ demo carries two mergeable RZs so Compile shows the optimizer
+  working). *(Deferred → G-17: autocompletion; QASM import into the visual Lab.)*
 
 ## Acceptance criteria
 
