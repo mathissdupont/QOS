@@ -25,6 +25,7 @@ fn touched(inst: &Instruction) -> (usize, Option<usize>) {
         | Instruction::Reset(q)
         | Instruction::Measure(q, _) => (*q, None),
         Instruction::Cx(a, b) | Instruction::Cz(a, b) | Instruction::Swap(a, b) => (*a, Some(*b)),
+        Instruction::Crz(a, b, _) | Instruction::Cp(a, b, _) => (*a, Some(*b)),
         Instruction::Barrier(_) => (usize::MAX, None), // treated as touching everything
     }
 }
@@ -85,6 +86,89 @@ pub fn cancel_pairs(mut instrs: Vec<Instruction>) -> (Vec<Instruction>, usize) {
         }
     }
     (instrs, removed)
+}
+
+/// Rotation axis key for merging: same-axis rotations on the same qubit compose by angle sum.
+fn rot_key(inst: &Instruction) -> Option<(u8, usize, f64)> {
+    match inst {
+        Instruction::Rx(q, t) => Some((0, *q, *t)),
+        Instruction::Ry(q, t) => Some((1, *q, *t)),
+        Instruction::Rz(q, t) => Some((2, *q, *t)),
+        Instruction::P(q, t) => Some((3, *q, *t)),
+        _ => None,
+    }
+}
+
+fn rot_make(axis: u8, q: usize, theta: f64) -> Instruction {
+    match axis {
+        0 => Instruction::Rx(q, theta),
+        1 => Instruction::Ry(q, theta),
+        2 => Instruction::Rz(q, theta),
+        _ => Instruction::P(q, theta),
+    }
+}
+
+/// Merge adjacent same-axis rotations on the same qubit (RZ(a)·RZ(b) → RZ(a+b)), dropping
+/// rotations that sum to ~0 (mod 2π). Runs to a fixpoint. Returns `(optimized, merged_count)`.
+pub fn merge_rotations(mut instrs: Vec<Instruction>) -> (Vec<Instruction>, usize) {
+    const TAU: f64 = 2.0 * core::f64::consts::PI;
+    let mut merged = 0;
+    loop {
+        let mut changed = false;
+        let mut i = 0;
+        'outer: while i < instrs.len() {
+            if let Some((axis, q, t0)) = rot_key(&instrs[i]) {
+                let mut j = i + 1;
+                while j < instrs.len() {
+                    if let Some((axis2, q2, t1)) = rot_key(&instrs[j]) {
+                        if axis2 == axis && q2 == q {
+                            // Compose the pair.
+                            let mut sum = (t0 + t1) % TAU;
+                            if sum > core::f64::consts::PI {
+                                sum -= TAU;
+                            }
+                            instrs.remove(j);
+                            if libm::fabs(sum) < 1e-12 {
+                                instrs.remove(i); // net identity
+                            } else {
+                                instrs[i] = rot_make(axis, q, sum);
+                            }
+                            merged += 1;
+                            changed = true;
+                            continue 'outer;
+                        }
+                    }
+                    if overlaps(&instrs[i], &instrs[j]) {
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+            i += 1;
+        }
+        if !changed {
+            break;
+        }
+    }
+    (instrs, merged)
+}
+
+/// The standard optimization pipeline: pair cancellation + rotation merging, to a joint
+/// fixpoint. Returns `(optimized, cancelled, merged)`.
+pub fn optimize(instrs: Vec<Instruction>) -> (Vec<Instruction>, usize, usize) {
+    let mut cur = instrs;
+    let (mut cancelled, mut merged) = (0usize, 0usize);
+    loop {
+        let (a, c) = cancel_pairs(cur);
+        let (b, m) = merge_rotations(a);
+        cancelled += c;
+        merged += m;
+        cur = b;
+        if c == 0 && m == 0 {
+            break;
+        }
+    }
+    (cur, cancelled, merged)
 }
 
 /// Circuit depth: the longest per-qubit timeline, counting each gate as one time step on every

@@ -221,6 +221,19 @@ impl Simulator {
         self.apply_controlled_inplace([[Complex::ZERO, Complex::ONE], [Complex::ONE, Complex::ZERO]], ctrl, targ);
     }
 
+    /// Apply CRZ(θ) — controlled rotation about Z (parametric).
+    pub fn apply_crz(&mut self, ctrl: usize, targ: usize, theta: f64) {
+        let e0 = Complex::new(libm::cos(theta / 2.0), -libm::sin(theta / 2.0));
+        let e1 = Complex::new(libm::cos(theta / 2.0), libm::sin(theta / 2.0));
+        self.apply_controlled_inplace([[e0, Complex::ZERO], [Complex::ZERO, e1]], ctrl, targ);
+    }
+
+    /// Apply CP(θ) — controlled phase diag(1, e^{iθ}) on the target (parametric).
+    pub fn apply_cp(&mut self, ctrl: usize, targ: usize, theta: f64) {
+        let e = Complex::new(libm::cos(theta), libm::sin(theta));
+        self.apply_controlled_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, e]], ctrl, targ);
+    }
+
     /// Apply CZ gate
     pub fn apply_cz(&mut self, ctrl: usize, targ: usize) {
         let nz = Complex::new(-1.0, 0.0);
@@ -338,6 +351,8 @@ impl Simulator {
             Instruction::Ry(q, theta) => self.apply_ry(*q, *theta),
             Instruction::Rz(q, theta) => self.apply_rz(*q, *theta),
             Instruction::P(q, theta) => self.apply_p(*q, *theta),
+            Instruction::Crz(c, t, theta) => self.apply_crz(*c, *t, *theta),
+            Instruction::Cp(c, t, theta) => self.apply_cp(*c, *t, *theta),
             Instruction::Barrier(_) => {
                 // Barrier is a no-op in simulation
             }

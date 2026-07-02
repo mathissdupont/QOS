@@ -35,6 +35,10 @@ pub enum Instruction {
     Cx(usize, usize),
     /// CZ gate: control, target
     Cz(usize, usize),
+    /// CRZ(θ): controlled Z-rotation — control, target
+    Crz(usize, usize, f64),
+    /// CP(θ): controlled phase — control, target
+    Cp(usize, usize, f64),
     /// SWAP: qubit1, qubit2
     Swap(usize, usize),
     /// Measure qubit to classical bit
@@ -471,6 +475,27 @@ pub fn parse_qasm2(input: &[u8]) -> Result<QasmProgram, ParseError> {
                     "ry" => Instruction::Ry(q, theta),
                     "rz" => Instruction::Rz(q, theta),
                     _ => Instruction::P(q, theta), // p / u1
+                });
+                lexer.expect(b';');
+            }
+            "crz" | "cp" | "cu1" => {
+                // Controlled parametric gate: crz(pi/2) q[0],q[1];
+                if !lexer.expect(b'(') {
+                    return Err(perr(&lexer, ParseErrorKind::InvalidSyntax(String::from("expected '(' after controlled parametric gate"))));
+                }
+                let theta = parse_angle(&mut lexer)?;
+                if !lexer.expect(b')') {
+                    return Err(perr(&lexer, ParseErrorKind::InvalidSyntax(String::from("expected ')'"))));
+                }
+                let ctrl = parse_qubit_ref(&mut lexer, &qreg_name, n_qubits)?;
+                if !lexer.expect(b',') {
+                    return Err(perr(&lexer, ParseErrorKind::InvalidSyntax(String::from("expected ','"))));
+                }
+                let targ = parse_qubit_ref(&mut lexer, &qreg_name, n_qubits)?;
+                instructions.push(if token == "crz" {
+                    Instruction::Crz(ctrl, targ, theta)
+                } else {
+                    Instruction::Cp(ctrl, targ, theta) // cp / cu1
                 });
                 lexer.expect(b';');
             }

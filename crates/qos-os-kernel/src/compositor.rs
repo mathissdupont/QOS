@@ -476,6 +476,160 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
     Some(c)
 }
 
+/// Sidebar snippet templates for the Quantum IDE (each opens as an unsaved buffer). The CRZ demo
+/// intentionally contains two mergeable RZ gates so Compile demonstrates the optimizer.
+const QASM_TEMPLATES: [(&str, &str); 3] = [
+    ("Bell", "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];"),
+    ("GHZ-3", "OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\nmeasure q[2] -> c[2];"),
+    ("CRZ demo", "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\nh q[1];\ncrz(pi/2) q[0],q[1];\nrz(pi/4) q[0];\nrz(pi/4) q[0];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];"),
+];
+
+/// Draw one QASM source line with per-token syntax highlighting (WP-07 slice 4): comments dim,
+/// keywords teal, gate names purple, numbers/`pi` amber, everything else the editor foreground.
+fn qasm_draw_line(s: &mut Surface, fr: &mut FontRenderer, x: i32, y: i32, line: &str, theme: &Theme) {
+    let teal = qos_ui::rgb(0x7a, 0xc8, 0xb0);
+    let purple = qos_ui::rgb(0xb8, 0x90, 0xf0);
+    let amber = qos_ui::rgb(0xe0, 0xb0, 0x60);
+    let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
+    let (code, comment) = match line.find("//") {
+        Some(i) => (&line[..i], Some(&line[i..])),
+        None => (line, None),
+    };
+    let mut cx = x;
+    let bytes = code.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphanumeric() || c == '_' || c == '.' {
+            let start = i;
+            while i < bytes.len() {
+                let c2 = bytes[i] as char;
+                if c2.is_ascii_alphanumeric() || c2 == '_' || c2 == '.' {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let tok = &code[start..i];
+            let col = if matches!(tok, "OPENQASM" | "qreg" | "creg" | "include" | "measure" | "barrier" | "reset") {
+                teal
+            } else if matches!(
+                tok,
+                "h" | "x" | "y" | "z" | "s" | "t" | "rx" | "ry" | "rz" | "p" | "u1" | "cx" | "cz"
+                    | "crz" | "cp" | "swap" | "cnot" | "CX" | "CZ" | "SWAP" | "CNOT"
+            ) {
+                purple
+            } else if tok == "pi" || tok.as_bytes()[0].is_ascii_digit() {
+                amber
+            } else {
+                mono
+            };
+            cx = fr.draw_text(s, cx, y, tok, 13.0, col);
+        } else {
+            // Punctuation / whitespace run (ASCII in QASM sources).
+            let start = i;
+            while i < bytes.len() {
+                let c2 = bytes[i] as char;
+                if c2.is_ascii_alphanumeric() || c2 == '_' || c2 == '.' || !c2.is_ascii() {
+                    break;
+                }
+                i += 1;
+            }
+            if i == start {
+                i += 1; // non-ASCII byte: skip defensively
+            }
+            cx = fr.draw_text(s, cx, y, &code[start..i], 13.0, mono);
+        }
+    }
+    if let Some(cm) = comment {
+        fr.draw_text(s, cx, y, cm, 13.0, theme.text_dim);
+    }
+}
+
+// ---- Shared text-editing core (WP-07 slice 3): used by the Quantum IDE and the Text Editor ----
+
+/// Byte offset of char-column `col` in `line` (UTF-8 safe).
+fn ed_byte_at(line: &str, col: usize) -> usize {
+    line.char_indices().nth(col).map(|(i, _)| i).unwrap_or(line.len())
+}
+
+/// The buffer as one string.
+fn ed_text(lines: &[String]) -> String {
+    lines.join("\n")
+}
+
+/// Replace the buffer; cursor moves to the end.
+fn ed_set_text(lines: &mut Vec<String>, cur: &mut (usize, usize), s: &str) {
+    *lines = s.split('\n').map(|l| l.to_string()).collect();
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    let last = lines.len() - 1;
+    *cur = (last, lines[last].chars().count());
+}
+
+/// Cursor movement with column clamping and line-end wrapping.
+fn ed_move(lines: &[String], cur: &mut (usize, usize), dx: i32, dy: i32) {
+    if dy < 0 && cur.0 > 0 {
+        cur.0 -= 1;
+        cur.1 = cur.1.min(lines[cur.0].chars().count());
+    } else if dy > 0 && cur.0 + 1 < lines.len() {
+        cur.0 += 1;
+        cur.1 = cur.1.min(lines[cur.0].chars().count());
+    }
+    if dx < 0 {
+        if cur.1 > 0 {
+            cur.1 -= 1;
+        } else if cur.0 > 0 {
+            cur.0 -= 1;
+            cur.1 = lines[cur.0].chars().count();
+        }
+    } else if dx > 0 {
+        let len = lines[cur.0].chars().count();
+        if cur.1 < len {
+            cur.1 += 1;
+        } else if cur.0 + 1 < lines.len() {
+            cur.0 += 1;
+            cur.1 = 0;
+        }
+    }
+}
+
+/// Insert a character at the cursor (no-op past `max_bytes` total).
+fn ed_insert(lines: &mut Vec<String>, cur: &mut (usize, usize), c: char, max_bytes: usize) {
+    let total: usize = lines.iter().map(|l| l.len() + 1).sum();
+    if total >= max_bytes {
+        return;
+    }
+    let at = ed_byte_at(&lines[cur.0], cur.1);
+    lines[cur.0].insert(at, c);
+    cur.1 += 1;
+}
+
+/// Backspace at the cursor (joins lines at column 0).
+fn ed_backspace(lines: &mut Vec<String>, cur: &mut (usize, usize)) {
+    let (l, col) = *cur;
+    if col > 0 {
+        let at = ed_byte_at(&lines[l], col - 1);
+        lines[l].remove(at);
+        cur.1 -= 1;
+    } else if l > 0 {
+        let tail = lines.remove(l);
+        let prev_len = lines[l - 1].chars().count();
+        lines[l - 1].push_str(&tail);
+        *cur = (l - 1, prev_len);
+    }
+}
+
+/// Enter: split the current line at the cursor.
+fn ed_newline(lines: &mut Vec<String>, cur: &mut (usize, usize)) {
+    let (l, col) = *cur;
+    let at = ed_byte_at(&lines[l], col);
+    let tail = lines[l].split_off(at);
+    lines.insert(l + 1, tail);
+    *cur = (l + 1, 0);
+}
+
 /// An in-window terminal: a scrollback buffer + an input line, with a small real command set that
 /// reaches actual subsystems (the quantum simulator, heap/uptime). This is the flagship of the
 /// "real, working apps" step (WP-05 step 5) and the first user-facing bridge to the quantum layer.
@@ -770,12 +924,12 @@ impl Terminal {
                             Err(e) => self.push(format!("qasm: {}", e.message())),
                             Ok(prog) => {
                                 let before = prog.instructions.len();
-                                let (opt, removed) =
-                                    crate::quantum::transpile::cancel_pairs(prog.instructions);
+                                let (opt, cancelled, merged) =
+                                    crate::quantum::transpile::optimize(prog.instructions);
                                 let d = crate::quantum::transpile::depth(&opt, prog.n_qubits);
                                 self.push(format!(
-                                    "compiled: {} qubits, {} -> {} gates ({} cancelled), depth {}",
-                                    prog.n_qubits, before, opt.len(), removed, d
+                                    "compiled: {} qubits, {} -> {} gates ({} cancelled, {} merged), depth {}",
+                                    prog.n_qubits, before, opt.len(), cancelled, merged, d
                                 ));
                                 match crate::quantum::sim::run_program(
                                     prog.n_qubits,
@@ -899,7 +1053,8 @@ struct Desktop {
     qlab_status: String,
     /// Text Editor: path of the open file (None = nothing open), buffer, and a status line.
     editor_path: Option<String>,
-    editor_buf: String,
+    editor_lines: Vec<String>,
+    editor_cur: (usize, usize),
     editor_status: String,
     /// Calculator state.
     calc: Calc,
@@ -961,7 +1116,8 @@ impl Desktop {
             qlab_result: Vec::new(),
             qlab_status: "Space places · Enter runs · arrows move".to_string(),
             editor_path: None,
-            editor_buf: String::new(),
+            editor_lines: vec![String::new()],
+            editor_cur: (0, 0),
             editor_status: "no file open — open one from Files".to_string(),
             calc: Calc::new(),
             files_scroll: 0,
@@ -1039,7 +1195,7 @@ impl Desktop {
                     return;
                 }
                 if editor_btn_rect(wr, 1).contains(cx, cy) {
-                    self.editor_buf.clear();
+                    ed_set_text(&mut self.editor_lines, &mut self.editor_cur, "");
                     self.editor_path = None;
                     self.editor_status = "new buffer — Save creates a file via New File in Files".to_string();
                     self.mark_full();
@@ -1153,6 +1309,13 @@ impl Desktop {
                             .unwrap_or_default();
                         let f = f.clone();
                         self.qasm_open(Some(f), content);
+                        return;
+                    }
+                }
+                // Templates: click opens the snippet as an unsaved buffer.
+                for (i, (_, src)) in QASM_TEMPLATES.iter().enumerate() {
+                    if qasm_side_row_rect(wr, files.len() + 1 + i).contains(cx, cy) {
+                        self.qasm_open(None, src.to_string());
                         return;
                     }
                 }
@@ -1518,12 +1681,13 @@ impl Desktop {
         };
         match bytes {
             Some(bytes) => {
-                self.editor_buf = String::from_utf8_lossy(&bytes).into_owned();
+                let text = String::from_utf8_lossy(&bytes).into_owned();
+                ed_set_text(&mut self.editor_lines, &mut self.editor_cur, &text);
                 self.editor_path = Some(path.to_string());
                 self.editor_status = format!("editing {}  ({} bytes)", path, bytes.len());
             }
             None => {
-                self.editor_buf.clear();
+                ed_set_text(&mut self.editor_lines, &mut self.editor_cur, "");
                 self.editor_path = Some(path.to_string());
                 self.editor_status = format!("editing {}  (new)", path);
             }
@@ -1535,12 +1699,13 @@ impl Desktop {
     fn editor_save(&mut self) {
         match self.editor_path.clone() {
             Some(path) => {
+                let text = ed_text(&self.editor_lines);
                 let res = match path.strip_prefix("disk:") {
-                    Some(name) => crate::diskfs::write(name.as_bytes(), self.editor_buf.as_bytes()),
-                    None => crate::fs::write(path.as_bytes(), self.editor_buf.as_bytes()),
+                    Some(name) => crate::diskfs::write(name.as_bytes(), text.as_bytes()),
+                    None => crate::fs::write(path.as_bytes(), text.as_bytes()),
                 };
                 match res {
-                    Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, self.editor_buf.len()),
+                    Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, text.len()),
                     Err(e) => self.editor_status = format!("save error: {}", e),
                 }
             }
@@ -1637,17 +1802,12 @@ impl Desktop {
     // ---- Quantum IDE (WP-07): real editing core + live preview + toolchain ----
     /// The buffer as one source string (for the parser / saving).
     fn qasm_text(&self) -> String {
-        self.qasm_lines.join("\n")
+        ed_text(&self.qasm_lines)
     }
 
     /// Replace the buffer, put the cursor at the end, and refresh the live preview.
     fn qasm_set_text(&mut self, s: &str) {
-        self.qasm_lines = s.split('\n').map(|l| l.to_string()).collect();
-        if self.qasm_lines.is_empty() {
-            self.qasm_lines.push(String::new());
-        }
-        let last = self.qasm_lines.len() - 1;
-        self.qasm_cur = (last, self.qasm_lines[last].chars().count());
+        ed_set_text(&mut self.qasm_lines, &mut self.qasm_cur, s);
         self.qasm_reparse();
     }
 
@@ -1688,84 +1848,29 @@ impl Desktop {
         }
     }
 
-    /// Clamp the cursor column to the current line length (after vertical moves).
-    fn qasm_clamp_col(&mut self) {
-        let line_len = self.qasm_lines[self.qasm_cur.0].chars().count();
-        if self.qasm_cur.1 > line_len {
-            self.qasm_cur.1 = line_len;
-        }
-    }
-
     /// Cursor movement: dx = -1/+1 within the line (wrapping over line ends), dy = -1/+1 lines.
     fn qasm_move(&mut self, dx: i32, dy: i32) {
-        if dy < 0 && self.qasm_cur.0 > 0 {
-            self.qasm_cur.0 -= 1;
-            self.qasm_clamp_col();
-        } else if dy > 0 && self.qasm_cur.0 + 1 < self.qasm_lines.len() {
-            self.qasm_cur.0 += 1;
-            self.qasm_clamp_col();
-        }
-        if dx < 0 {
-            if self.qasm_cur.1 > 0 {
-                self.qasm_cur.1 -= 1;
-            } else if self.qasm_cur.0 > 0 {
-                self.qasm_cur.0 -= 1;
-                self.qasm_cur.1 = self.qasm_lines[self.qasm_cur.0].chars().count();
-            }
-        } else if dx > 0 {
-            let len = self.qasm_lines[self.qasm_cur.0].chars().count();
-            if self.qasm_cur.1 < len {
-                self.qasm_cur.1 += 1;
-            } else if self.qasm_cur.0 + 1 < self.qasm_lines.len() {
-                self.qasm_cur.0 += 1;
-                self.qasm_cur.1 = 0;
-            }
-        }
+        ed_move(&self.qasm_lines, &mut self.qasm_cur, dx, dy);
         self.mark_top_window();
-    }
-
-    /// Byte offset of char-column `col` in `line` (UTF-8 safe).
-    fn byte_at(line: &str, col: usize) -> usize {
-        line.char_indices().nth(col).map(|(i, _)| i).unwrap_or(line.len())
     }
 
     /// Insert a character at the cursor.
     fn qasm_insert(&mut self, c: char) {
-        if self.qasm_text().len() >= 32 * 1024 {
-            return;
-        }
-        let (l, col) = self.qasm_cur;
-        let at = Self::byte_at(&self.qasm_lines[l], col);
-        self.qasm_lines[l].insert(at, c);
-        self.qasm_cur.1 += 1;
+        ed_insert(&mut self.qasm_lines, &mut self.qasm_cur, c, 32 * 1024);
         self.qasm_reparse();
         self.mark_top_window();
     }
 
     /// Backspace: delete before the cursor, joining lines at column 0.
     fn qasm_backspace(&mut self) {
-        let (l, col) = self.qasm_cur;
-        if col > 0 {
-            let at = Self::byte_at(&self.qasm_lines[l], col - 1);
-            self.qasm_lines[l].remove(at);
-            self.qasm_cur.1 -= 1;
-        } else if l > 0 {
-            let tail = self.qasm_lines.remove(l);
-            let prev_len = self.qasm_lines[l - 1].chars().count();
-            self.qasm_lines[l - 1].push_str(&tail);
-            self.qasm_cur = (l - 1, prev_len);
-        }
+        ed_backspace(&mut self.qasm_lines, &mut self.qasm_cur);
         self.qasm_reparse();
         self.mark_top_window();
     }
 
     /// Enter: split the current line at the cursor.
     fn qasm_newline(&mut self) {
-        let (l, col) = self.qasm_cur;
-        let at = Self::byte_at(&self.qasm_lines[l], col);
-        let tail = self.qasm_lines[l].split_off(at);
-        self.qasm_lines.insert(l + 1, tail);
-        self.qasm_cur = (l + 1, 0);
+        ed_newline(&mut self.qasm_lines, &mut self.qasm_cur);
         self.qasm_reparse();
         self.mark_top_window();
     }
@@ -1799,10 +1904,13 @@ impl Desktop {
                     self.qasm_status = format!("error: qubit count {} out of range (1..={})", prog.n_qubits, sim::MAX_QUBITS);
                 } else {
                     let before = prog.instructions.len();
-                    let (opt, removed) = transpile::cancel_pairs(prog.instructions);
+                    let (opt, cancelled, merged) = transpile::optimize(prog.instructions);
                     let d = transpile::depth(&opt, prog.n_qubits);
-                    self.qasm_status = if removed > 0 {
-                        format!("compiled: {} qubits · {} -> {} gates ({} cancelled) · depth {}", prog.n_qubits, before, opt.len(), removed, d)
+                    self.qasm_status = if cancelled > 0 || merged > 0 {
+                        format!(
+                            "compiled: {} qubits · {} -> {} gates ({} cancelled, {} merged) · depth {}",
+                            prog.n_qubits, before, opt.len(), cancelled, merged, d
+                        )
                     } else {
                         format!("compiled: {} qubits · {} gates · depth {}", prog.n_qubits, before, d)
                     };
@@ -1819,7 +1927,7 @@ impl Desktop {
         let text = self.qasm_text();
         match parser::parse_qasm2(text.as_bytes()) {
             Ok(prog) => {
-                let (opt, _) = transpile::cancel_pairs(prog.instructions);
+                let (opt, _, _) = transpile::optimize(prog.instructions);
                 match sim::run_program(prog.n_qubits, prog.n_cbits.max(prog.n_qubits), opt, QLAB_SHOTS) {
                     Some(res) => {
                         let mut pairs: Vec<(String, u64)> =
@@ -2230,27 +2338,33 @@ impl Desktop {
                     let lw = fr.text_width(label, 13.0);
                     fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 18, label, 13.0, if i == 0 { theme.on_accent } else { theme.text });
                 }
-                // Status line.
+                // Status line (left) + cursor position (right).
                 fr.draw_text(s, r.x + 16 + 2 * 96 + 8, r.y + HEADER_H + 28, &self.editor_status, 12.0, theme.text_dim);
-                // Text area.
-                let area = Rect::new(r.x + 12, r.y + HEADER_H + 46, r.w - 24, r.h - HEADER_H - 58);
+                // Text area with the shared cursor-editing core (WP-07 slice 3).
+                let area = Rect::new(r.x + 12, r.y + HEADER_H + 46, r.w - 24, r.h - HEADER_H - 76);
                 s.rounded_rect(area, 8, qos_ui::rgb(0x12, 0x14, 0x1a));
                 let tx = area.x + 12;
                 let line_h = 18;
                 let max_rows = ((area.h - 16) / line_h).max(1) as usize;
                 let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
-                // Render buffer lines with a block cursor at the end; scroll to keep the tail visible.
-                let mut lines: Vec<&str> = self.editor_buf.split('\n').collect();
-                // The trailing element after a final '\n' is "", which is the current (empty) line.
-                let total = lines.len();
-                let start = total.saturating_sub(max_rows);
+                let (cl, cc) = self.editor_cur;
+                let first = if cl >= max_rows { cl + 1 - max_rows } else { 0 };
                 let mut ty = area.y + 22;
-                for (li, line) in lines.drain(..).enumerate().skip(start) {
-                    let is_last = li + 1 == total;
-                    let shown = if is_last { format!("{}_", line) } else { line.to_string() };
-                    fr.draw_text(s, tx, ty, &shown, 14.0, mono);
+                for (li, line) in self.editor_lines.iter().enumerate().skip(first).take(max_rows) {
+                    if li == cl {
+                        s.fill_rect(Rect::new(area.x + 2, ty - 13, area.w - 4, line_h), qos_ui::rgb(0x1c, 0x20, 0x2c));
+                    }
+                    fr.draw_text(s, tx, ty, line, 14.0, mono);
+                    if li == cl {
+                        let prefix: String = line.chars().take(cc).collect();
+                        let cw = fr.text_width(&prefix, 14.0);
+                        s.fill_rect(Rect::new(tx + cw, ty - 12, 2, 15), theme.accent);
+                    }
                     ty += line_h;
                 }
+                let pos = format!("Ln {}, Col {}", cl + 1, cc + 1);
+                let pw = fr.text_width(&pos, 11.0);
+                fr.draw_text(s, r.right() - pw - 14, area.bottom() + 16, &pos, 11.0, theme.text_dim);
             }
             AppKind::Qasm => {
                 // ---- Quantum IDE (WP-07): toolbar | sidebar | code | preview | status ----
@@ -2283,6 +2397,18 @@ impl Desktop {
                 if files.is_empty() {
                     fr.draw_text(s, side.x + 10, side.y + 40, "(no .qasm files)", 11.0, theme.text_dim);
                 }
+                // Snippet templates (open as an unsaved buffer).
+                let thdr = qasm_side_row_rect(r, files.len());
+                if thdr.bottom() < side.bottom() - 4 {
+                    fr.draw_text(s, thdr.x + 4, thdr.y + 15, "TEMPLATES", 11.0, theme.text_dim);
+                    for (i, (name, _)) in QASM_TEMPLATES.iter().enumerate() {
+                        let row = qasm_side_row_rect(r, files.len() + 1 + i);
+                        if row.bottom() > side.bottom() - 4 {
+                            break;
+                        }
+                        fr.draw_text(s, row.x + 8, row.y + 15, name, 12.0, theme.accent);
+                    }
+                }
 
                 // Code pane: line numbers, current-line highlight, real cursor caret.
                 let code = qasm_code_rect(r);
@@ -2293,8 +2419,6 @@ impl Desktop {
                 // Scroll so the cursor line is visible.
                 let first = if cl >= max_rows { cl + 1 - max_rows } else { 0 };
                 let gutter = 34;
-                let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
-                let key_col = qos_ui::rgb(0x7a, 0xc8, 0xb0);
                 let mut ty = code.y + 20;
                 let problem_line = self.qasm_problem.as_ref().map(|(l, _)| *l).unwrap_or(0);
                 for (li, line) in self.qasm_lines.iter().enumerate().skip(first).take(max_rows) {
@@ -2307,12 +2431,8 @@ impl Desktop {
                     // The problem line's number turns red (VS Code-style gutter marker).
                     let num_col = if problem_line == li + 1 { qos_ui::rgb(0xe0, 0x60, 0x50) } else { theme.text_dim };
                     fr.draw_text(s, code.x + gutter - 8 - nw, ty, &num, 11.0, num_col);
-                    let col = if line.starts_with("OPENQASM") || line.starts_with("qreg") || line.starts_with("creg") || line.starts_with("measure") || line.starts_with("include") {
-                        key_col
-                    } else {
-                        mono
-                    };
-                    fr.draw_text(s, code.x + gutter, ty, line, 13.0, col);
+                    // Per-token syntax highlighting.
+                    qasm_draw_line(s, fr, code.x + gutter, ty, line, theme);
                     if li == cl {
                         // Caret at the cursor column (proportional-font width of the prefix).
                         let prefix: String = line.chars().take(cc).collect();
@@ -2381,6 +2501,20 @@ impl Desktop {
                                         circle(s, gx, y0, 7, theme.accent);
                                         circle(s, gx, y1, 11, theme.accent);
                                         circle(s, gx, y1, 7, theme.surface_alt);
+                                    }
+                                }
+                                I::Crz(c, t, _) | I::Cp(c, t, _) => {
+                                    // Controlled parametric: control dot + labeled target box.
+                                    if *c < shown_q && *t < shown_q {
+                                        let (y0, y1) = (wy(*c), wy(*t));
+                                        let (top, bot) = if y0 < y1 { (y0, y1) } else { (y1, y0) };
+                                        s.fill_rect(Rect::new(gx - 1, top, 2, bot - top), theme.accent);
+                                        circle(s, gx, y0, 7, theme.accent);
+                                        let label = if matches!(inst, I::Crz(..)) { "Rz" } else { "P" };
+                                        let b = Rect::new(gx - 9, y1 - 8, 18, 16);
+                                        s.rounded_rect(b, 4, qos_ui::rgb(0x8a, 0x5c, 0xd8));
+                                        let lw = fr.text_width(label, 10.0);
+                                        fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 12, label, 10.0, qos_ui::rgb(0xff, 0xff, 0xff));
                                     }
                                 }
                                 I::Measure(q, _) => boxed(s, fr, *q, "M"),
@@ -3133,22 +3267,36 @@ pub fn run_demo() {
                             }
                         }
                     } else if desk.top_is_editor() {
-                        // Focused Text Editor edits its buffer.
+                        // Focused Text Editor: same cursor-editing core as the Quantum IDE.
                         match scancode {
+                            0x48 => {
+                                ed_move(&desk.editor_lines, &mut desk.editor_cur, 0, -1);
+                                desk.mark_top_window();
+                            } // Up
+                            0x50 => {
+                                ed_move(&desk.editor_lines, &mut desk.editor_cur, 0, 1);
+                                desk.mark_top_window();
+                            } // Down
+                            0x4B => {
+                                ed_move(&desk.editor_lines, &mut desk.editor_cur, -1, 0);
+                                desk.mark_top_window();
+                            } // Left
+                            0x4D => {
+                                ed_move(&desk.editor_lines, &mut desk.editor_cur, 1, 0);
+                                desk.mark_top_window();
+                            } // Right
                             0x0E => {
-                                desk.editor_buf.pop();
+                                ed_backspace(&mut desk.editor_lines, &mut desk.editor_cur);
                                 desk.mark_top_window();
-                            } // Backspace
+                            } // Backspace (at cursor)
                             0x1C => {
-                                desk.editor_buf.push('\n');
+                                ed_newline(&mut desk.editor_lines, &mut desk.editor_cur);
                                 desk.mark_top_window();
-                            } // Enter → newline
+                            } // Enter (split at cursor)
                             _ => {
                                 if let Some(c) = scancode_to_char(scancode, shift) {
-                                    if desk.editor_buf.len() < 32 * 1024 {
-                                        desk.editor_buf.push(c);
-                                        desk.mark_top_window();
-                                    }
+                                    ed_insert(&mut desk.editor_lines, &mut desk.editor_cur, c, 32 * 1024);
+                                    desk.mark_top_window();
                                 }
                             }
                         }
