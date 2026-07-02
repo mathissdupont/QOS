@@ -34,17 +34,26 @@ const DOCK_GAP: i32 = 16;
 enum AppKind {
     Terminal,
     Files,
+    Editor,
     Quantum,
     Monitor,
     Settings,
 }
 
-const APPS: [AppKind; 5] = [AppKind::Terminal, AppKind::Files, AppKind::Quantum, AppKind::Monitor, AppKind::Settings];
+const APPS: [AppKind; 6] = [
+    AppKind::Terminal,
+    AppKind::Files,
+    AppKind::Editor,
+    AppKind::Quantum,
+    AppKind::Monitor,
+    AppKind::Settings,
+];
 
 fn app_title(k: AppKind) -> &'static str {
     match k {
         AppKind::Terminal => "Terminal",
         AppKind::Files => "Files",
+        AppKind::Editor => "Text Editor",
         AppKind::Quantum => "Quantum Lab",
         AppKind::Monitor => "System Monitor",
         AppKind::Settings => "Settings",
@@ -57,6 +66,7 @@ fn app_dock_letter(k: AppKind) -> &'static str {
     match k {
         AppKind::Terminal => "T",
         AppKind::Files => "F",
+        AppKind::Editor => "E",
         AppKind::Quantum => "Q",
         AppKind::Monitor => "M",
         AppKind::Settings => "S",
@@ -67,6 +77,7 @@ fn app_tint(k: AppKind, theme: &Theme) -> qos_ui::Rgb {
     match k {
         AppKind::Terminal => theme.accent,
         AppKind::Files => qos_ui::rgb(0x30, 0xb0, 0x60),
+        AppKind::Editor => qos_ui::rgb(0xd0, 0x9a, 0x2a),
         AppKind::Quantum => qos_ui::rgb(0x8a, 0x5c, 0xd8),
         AppKind::Monitor => qos_ui::rgb(0x27, 0xa8, 0xc8),
         AppKind::Settings => qos_ui::rgb(0xe0, 0x7a, 0x2a),
@@ -79,9 +90,22 @@ fn circle(s: &mut Surface, cx: i32, cy: i32, d: i32, color: qos_ui::Rgb) {
 }
 
 // Per-app clickable geometry, shared by drawing + hit-testing so they stay in sync (`win` = window
-// rect). Files entry rows, Quantum Lab run buttons, and the Settings theme toggle.
+// rect). Files toolbar + entry rows, Quantum Lab run buttons, the Settings theme toggle, and the
+// Text Editor action buttons.
+
+/// Files toolbar buttons (real file-manager ops), laid across the top of the body.
+const FILES_TOOLBAR: [&str; 5] = ["New File", "New Dir", "Rename", "Delete", "Edit"];
+fn files_tool_rect(win: Rect, i: usize) -> Rect {
+    let bw = 90;
+    let gap = 5;
+    Rect::new(win.x + 16 + i as i32 * (bw + gap), win.y + HEADER_H + 32, bw, 26)
+}
 fn files_row_rect(win: Rect, i: usize) -> Rect {
-    Rect::new(win.x + 16, win.y + HEADER_H + 42 + i as i32 * 28, win.w - 32, 24)
+    Rect::new(win.x + 16, win.y + HEADER_H + 72 + i as i32 * 28, win.w - 32, 24)
+}
+/// Centered modal box for entering a name (New File / New Dir / Rename).
+fn files_name_box(win: Rect) -> Rect {
+    Rect::new(win.x + 36, win.y + HEADER_H + 96, win.w - 72, 96)
 }
 fn qlab_btn_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 24 + i as i32 * 150, win.y + HEADER_H + 108, 132, 40)
@@ -89,12 +113,24 @@ fn qlab_btn_rect(win: Rect, i: usize) -> Rect {
 fn settings_theme_rect(win: Rect) -> Rect {
     Rect::new(win.x + 24, win.y + HEADER_H + 30, 220, 36)
 }
-const FILES_MAX_ROWS: usize = 6;
+/// Text Editor action buttons (Save / New).
+fn editor_btn_rect(win: Rect, i: usize) -> Rect {
+    Rect::new(win.x + 16 + i as i32 * 96, win.y + HEADER_H + 10, 88, 26)
+}
+const FILES_MAX_ROWS: usize = 5;
 
 /// An open window on the desktop.
 struct Win {
     rect: Rect,
     kind: AppKind,
+}
+
+/// Which kind of name the Files naming modal is collecting.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NameMode {
+    NewFile,
+    NewDir,
+    Rename,
 }
 
 /// Translate a PS/2 Set-1 make scancode to a character (honoring shift). `None` for non-text keys.
@@ -277,8 +313,19 @@ struct Desktop {
     /// Files app: current directory (empty = root) + optional file preview text.
     files_cwd: String,
     files_preview: Option<String>,
+    /// Files: the currently selected entry name (for Rename/Delete/Edit).
+    files_sel: Option<String>,
+    /// Files: a status/error line under the toolbar (e.g. "deleted", "cannot delete non-empty dir").
+    files_status: String,
+    /// Files: active naming modal (kind + typed buffer), if any.
+    files_naming: Option<NameMode>,
+    files_name_buf: String,
     /// Quantum Lab: last run's result lines.
     qlab: Vec<String>,
+    /// Text Editor: path of the open file (None = nothing open), buffer, and a status line.
+    editor_path: Option<String>,
+    editor_buf: String,
+    editor_status: String,
 }
 
 /// Margin around a window rect that its shadow extends into (for damage rects).
@@ -304,7 +351,14 @@ impl Desktop {
             term: Terminal::new(),
             files_cwd: String::new(),
             files_preview: None,
+            files_sel: None,
+            files_status: String::new(),
+            files_naming: None,
+            files_name_buf: String::new(),
             qlab: Vec::new(),
+            editor_path: None,
+            editor_buf: String::new(),
+            editor_status: "no file open — open one from Files".to_string(),
         }
     }
 
@@ -326,6 +380,17 @@ impl Desktop {
     fn on_body_click(&mut self, kind: AppKind, wr: Rect, cx: i32, cy: i32) {
         match kind {
             AppKind::Files => {
+                // A naming modal is open: swallow body clicks (commit is Enter, cancel is Esc).
+                if self.files_naming.is_some() {
+                    return;
+                }
+                // Toolbar buttons: real file-manager operations.
+                for i in 0..FILES_TOOLBAR.len() {
+                    if files_tool_rect(wr, i).contains(cx, cy) {
+                        self.files_tool(i);
+                        return;
+                    }
+                }
                 let list = self.files_list();
                 for (i, (name, is_dir, _)) in list.iter().enumerate().take(FILES_MAX_ROWS) {
                     if files_row_rect(wr, i).contains(cx, cy) {
@@ -333,6 +398,19 @@ impl Desktop {
                         self.files_click(&n, d);
                         return;
                     }
+                }
+            }
+            AppKind::Editor => {
+                if editor_btn_rect(wr, 0).contains(cx, cy) {
+                    self.editor_save();
+                    return;
+                }
+                if editor_btn_rect(wr, 1).contains(cx, cy) {
+                    self.editor_buf.clear();
+                    self.editor_path = None;
+                    self.editor_status = "new buffer — Save creates a file via New File in Files".to_string();
+                    self.mark_full();
+                    return;
                 }
             }
             AppKind::Quantum => {
@@ -353,8 +431,18 @@ impl Desktop {
         }
     }
 
-    /// Navigate the Files app into `name` (a subdir) or up (`..`), or preview a file.
+    /// Absolute path (relative to fs root) of `name` in the current directory.
+    fn files_path(&self, name: &str) -> String {
+        if self.files_cwd.is_empty() {
+            name.to_string()
+        } else {
+            format!("{}/{}", self.files_cwd, name)
+        }
+    }
+
+    /// Navigate the Files app into `name` (a subdir) or up (`..`), or select+preview a file.
     fn files_click(&mut self, name: &str, is_dir: bool) {
+        self.files_status.clear();
         if name == ".." {
             // Go up one path segment.
             if let Some(pos) = self.files_cwd.rfind('/') {
@@ -363,19 +451,20 @@ impl Desktop {
                 self.files_cwd.clear();
             }
             self.files_preview = None;
+            self.files_sel = None;
         } else if is_dir {
+            // Single click selects a dir; navigating in is via double-purpose: select then click
+            // again enters. Keep it simple: clicking a dir enters it (mirrors the old behavior).
             if !self.files_cwd.is_empty() {
                 self.files_cwd.push('/');
             }
             self.files_cwd.push_str(name);
             self.files_preview = None;
+            self.files_sel = None;
         } else {
-            // Preview the file's text.
-            let path = if self.files_cwd.is_empty() {
-                name.to_string()
-            } else {
-                format!("{}/{}", self.files_cwd, name)
-            };
+            // Select the file and preview its text.
+            self.files_sel = Some(name.to_string());
+            let path = self.files_path(name);
             self.files_preview = Some(match crate::fs::read(path.as_bytes()) {
                 Some(bytes) => {
                     let mut s = String::new();
@@ -386,6 +475,154 @@ impl Desktop {
                 }
                 None => "(cannot read)".to_string(),
             });
+        }
+        self.mark_full();
+    }
+
+    /// A Files toolbar button was clicked (index into `FILES_TOOLBAR`).
+    fn files_tool(&mut self, i: usize) {
+        self.files_status.clear();
+        match i {
+            0 => self.files_begin_name(NameMode::NewFile), // New File
+            1 => self.files_begin_name(NameMode::NewDir),  // New Dir
+            2 => {
+                // Rename: needs a selection.
+                if self.files_sel.is_some() {
+                    self.files_begin_name(NameMode::Rename);
+                } else {
+                    self.files_status = "select an item first".to_string();
+                    self.mark_full();
+                }
+            }
+            3 => self.files_delete(), // Delete
+            4 => self.files_edit(),   // Edit (open in Text Editor)
+            _ => {}
+        }
+    }
+
+    /// Open the Files naming modal in `mode` (prefilled with the selection for Rename).
+    fn files_begin_name(&mut self, mode: NameMode) {
+        self.files_name_buf = match mode {
+            NameMode::Rename => self.files_sel.clone().unwrap_or_default(),
+            _ => String::new(),
+        };
+        self.files_naming = Some(mode);
+        self.mark_full();
+    }
+
+    fn files_cancel_name(&mut self) {
+        self.files_naming = None;
+        self.files_name_buf.clear();
+        self.mark_full();
+    }
+
+    /// Commit the naming modal → the corresponding real fs operation.
+    fn files_commit_name(&mut self) {
+        let Some(mode) = self.files_naming else { return };
+        let name = self.files_name_buf.trim().to_string();
+        self.files_naming = None;
+        self.files_name_buf.clear();
+        if name.is_empty() || name.contains('/') {
+            self.files_status = "invalid name".to_string();
+            self.mark_full();
+            return;
+        }
+        match mode {
+            NameMode::NewFile => {
+                let path = self.files_path(&name);
+                match crate::fs::write(path.as_bytes(), b"") {
+                    Ok(()) => {
+                        self.files_status = format!("created {}", name);
+                        self.files_sel = Some(name);
+                    }
+                    Err(e) => self.files_status = format!("error: {}", e),
+                }
+            }
+            NameMode::NewDir => {
+                let path = self.files_path(&name);
+                match crate::fs::mkdir(path.as_bytes()) {
+                    Ok(()) => self.files_status = format!("created {}/", name),
+                    Err(e) => self.files_status = format!("error: {}", e),
+                }
+            }
+            NameMode::Rename => {
+                if let Some(old) = self.files_sel.clone() {
+                    let from = self.files_path(&old);
+                    let to = self.files_path(&name);
+                    match crate::fs::rename(from.as_bytes(), to.as_bytes()) {
+                        Ok(()) => {
+                            self.files_status = format!("renamed to {}", name);
+                            self.files_sel = Some(name);
+                            self.files_preview = None;
+                        }
+                        Err(e) => self.files_status = format!("error: {}", e),
+                    }
+                }
+            }
+        }
+        self.mark_full();
+    }
+
+    /// Delete the selected entry (files, or empty dirs — the fs enforces non-empty).
+    fn files_delete(&mut self) {
+        let Some(name) = self.files_sel.clone() else {
+            self.files_status = "select an item first".to_string();
+            self.mark_full();
+            return;
+        };
+        let path = self.files_path(&name);
+        match crate::fs::remove(path.as_bytes()) {
+            Ok(()) => {
+                self.files_status = format!("deleted {}", name);
+                self.files_sel = None;
+                self.files_preview = None;
+            }
+            Err(e) => self.files_status = format!("cannot delete: {}", e),
+        }
+        self.mark_full();
+    }
+
+    /// Open the selected file in the Text Editor.
+    fn files_edit(&mut self) {
+        let Some(name) = self.files_sel.clone() else {
+            self.files_status = "select a file first".to_string();
+            self.mark_full();
+            return;
+        };
+        if crate::fs::is_dir(self.files_path(&name).as_bytes()) {
+            self.files_status = "cannot edit a directory".to_string();
+            self.mark_full();
+            return;
+        }
+        let path = self.files_path(&name);
+        self.editor_open(&path);
+        self.open_app(AppKind::Editor);
+    }
+
+    /// Load `path` into the Text Editor buffer.
+    fn editor_open(&mut self, path: &str) {
+        match crate::fs::read(path.as_bytes()) {
+            Some(bytes) => {
+                self.editor_buf = String::from_utf8_lossy(&bytes).into_owned();
+                self.editor_path = Some(path.to_string());
+                self.editor_status = format!("editing {}  ({} bytes)", path, bytes.len());
+            }
+            None => {
+                self.editor_buf.clear();
+                self.editor_path = Some(path.to_string());
+                self.editor_status = format!("editing {}  (new)", path);
+            }
+        }
+    }
+
+    /// Save the Text Editor buffer back to its file via the real fs.
+    fn editor_save(&mut self) {
+        match self.editor_path.clone() {
+            Some(path) => match crate::fs::write(path.as_bytes(), self.editor_buf.as_bytes()) {
+                Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, self.editor_buf.len()),
+                Err(e) => self.editor_status = format!("save error: {}", e),
+            },
+            None => self.editor_status = "no file — create one from Files first".to_string(),
         }
         self.mark_full();
     }
@@ -422,6 +659,17 @@ impl Desktop {
     /// True if the focused window is the System Monitor — used to refresh it live.
     fn top_is_monitor(&self) -> bool {
         self.wins.last().map_or(false, |w| w.kind == AppKind::Monitor)
+    }
+
+    /// True if the focused window is the Text Editor — then typed keys edit its buffer.
+    fn top_is_editor(&self) -> bool {
+        self.wins.last().map_or(false, |w| w.kind == AppKind::Editor)
+    }
+
+    /// True while the Files naming modal is open and the focused window is Files — then typed keys
+    /// go to the name buffer.
+    fn files_naming_active(&self) -> bool {
+        self.files_naming.is_some() && self.wins.last().map_or(false, |w| w.kind == AppKind::Files)
     }
 
     /// Mark just the focused window's footprint (plus shadow) dirty — used for terminal typing so a
@@ -597,29 +845,96 @@ impl Desktop {
             AppKind::Files => {
                 // Real listing of the current directory (the in-kernel filesystem).
                 let path = if self.files_cwd.is_empty() { "/".to_string() } else { format!("/{}", self.files_cwd) };
-                fr.draw_text(s, bx, r.y + HEADER_H + 26, &path, 14.0, theme.text_dim);
+                fr.draw_text(s, bx, r.y + HEADER_H + 22, &path, 14.0, theme.text_dim);
+                // Keyboard-shortcut hint (right-aligned) — this is a real keyboard-driven file mgr.
+                let hint = "keys  n·new  k·dir  r·ren  x·del  e·edit";
+                let hw = fr.text_width(hint, 11.0);
+                fr.draw_text(s, r.right() - hw - 16, r.y + HEADER_H + 22, hint, 11.0, theme.text_dim);
+                // Toolbar (real file-manager ops).
+                for (i, label) in FILES_TOOLBAR.iter().enumerate() {
+                    let b = files_tool_rect(r, i);
+                    s.rounded_rect(b, 7, theme.surface_alt);
+                    let lw = fr.text_width(label, 12.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 17, label, 12.0, theme.text);
+                }
+                // Directory entries (selected row highlighted with the accent).
                 let list = self.files_list();
                 for (i, (name, is_dir, size)) in list.iter().take(FILES_MAX_ROWS).enumerate() {
                     let rr = files_row_rect(r, i);
-                    s.rounded_rect(rr, 6, theme.surface_alt);
+                    let selected = self.files_sel.as_deref() == Some(name.as_str());
+                    s.rounded_rect(rr, 6, if selected { theme.accent } else { theme.surface_alt });
+                    let txt = if selected { theme.on_accent } else { theme.text };
+                    let dim = if selected { theme.on_accent } else { theme.text_dim };
                     let icon = if *is_dir { "[D]" } else { "[F]" };
-                    fr.draw_text(s, rr.x + 10, rr.y + 17, icon, 13.0, if *is_dir { theme.accent } else { theme.text_dim });
-                    fr.draw_text(s, rr.x + 46, rr.y + 17, name, 14.0, theme.text);
+                    fr.draw_text(s, rr.x + 10, rr.y + 17, icon, 13.0, if *is_dir && !selected { theme.accent } else { dim });
+                    fr.draw_text(s, rr.x + 46, rr.y + 17, name, 14.0, txt);
                     if !*is_dir {
                         let sz = format!("{} B", size);
                         let sw = fr.text_width(&sz, 12.0);
-                        fr.draw_text(s, rr.right() - sw - 12, rr.y + 17, &sz, 12.0, theme.text_dim);
+                        fr.draw_text(s, rr.right() - sw - 12, rr.y + 17, &sz, 12.0, dim);
                     }
                 }
+                // Status line + preview, below the rows.
+                let rows = list.len().min(FILES_MAX_ROWS);
+                let py = files_row_rect(r, rows).y + 6;
+                if !self.files_status.is_empty() {
+                    fr.draw_text(s, r.x + 16, py + 4, &self.files_status, 12.0, theme.text_dim);
+                }
                 if let Some(prev) = &self.files_preview {
-                    let rows = list.len().min(FILES_MAX_ROWS);
-                    let py = files_row_rect(r, rows).y + 6;
+                    let py = py + 18;
                     s.fill_rect(Rect::new(r.x + 16, py, r.w - 32, 1), theme.border);
-                    let mut ly = py + 22;
-                    for line in prev.split('\n').take(5) {
+                    let mut ly = py + 20;
+                    for line in prev.split('\n').take(4) {
                         fr.draw_text(s, r.x + 20, ly, line, 13.0, theme.text_dim);
                         ly += 18;
                     }
+                }
+                // Naming modal overlay (New File / New Dir / Rename).
+                if let Some(mode) = self.files_naming {
+                    let box_r = files_name_box(r);
+                    s.drop_shadow(box_r, 12, 18, theme.shadow, if theme.is_dark { 150 } else { 80 });
+                    s.rounded_rect(box_r, 12, theme.surface_alt);
+                    let title = match mode {
+                        NameMode::NewFile => "New file name:",
+                        NameMode::NewDir => "New directory name:",
+                        NameMode::Rename => "Rename to:",
+                    };
+                    fr.draw_text(s, box_r.x + 16, box_r.y + 26, title, 14.0, theme.text);
+                    let field = Rect::new(box_r.x + 16, box_r.y + 38, box_r.w - 32, 26);
+                    s.rounded_rect(field, 6, theme.surface);
+                    let shown = format!("{}_", self.files_name_buf);
+                    fr.draw_text(s, field.x + 10, field.y + 18, &shown, 14.0, theme.text);
+                    fr.draw_text(s, box_r.x + 16, box_r.bottom() - 8, "Enter = ok    Esc = cancel", 12.0, theme.text_dim);
+                }
+            }
+            AppKind::Editor => {
+                // Action buttons.
+                for (i, label) in ["Save", "New"].iter().enumerate() {
+                    let b = editor_btn_rect(r, i);
+                    s.rounded_rect(b, 7, if i == 0 { theme.accent } else { theme.surface_alt });
+                    let lw = fr.text_width(label, 13.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 18, label, 13.0, if i == 0 { theme.on_accent } else { theme.text });
+                }
+                // Status line.
+                fr.draw_text(s, r.x + 16 + 2 * 96 + 8, r.y + HEADER_H + 28, &self.editor_status, 12.0, theme.text_dim);
+                // Text area.
+                let area = Rect::new(r.x + 12, r.y + HEADER_H + 46, r.w - 24, r.h - HEADER_H - 58);
+                s.rounded_rect(area, 8, qos_ui::rgb(0x12, 0x14, 0x1a));
+                let tx = area.x + 12;
+                let line_h = 18;
+                let max_rows = ((area.h - 16) / line_h).max(1) as usize;
+                let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
+                // Render buffer lines with a block cursor at the end; scroll to keep the tail visible.
+                let mut lines: Vec<&str> = self.editor_buf.split('\n').collect();
+                // The trailing element after a final '\n' is "", which is the current (empty) line.
+                let total = lines.len();
+                let start = total.saturating_sub(max_rows);
+                let mut ty = area.y + 22;
+                for (li, line) in lines.drain(..).enumerate().skip(start) {
+                    let is_last = li + 1 == total;
+                    let shown = if is_last { format!("{}_", line) } else { line.to_string() };
+                    fr.draw_text(s, tx, ty, &shown, 14.0, mono);
+                    ty += line_h;
                 }
             }
             AppKind::Quantum => {
@@ -1070,11 +1385,33 @@ pub fn run_demo() {
                         continue;
                     }
                     if scancode == 0x01 {
+                        // Esc cancels an open naming modal first; otherwise drops to the shell.
+                        if desk.files_naming_active() {
+                            desk.files_cancel_name();
+                            continue;
+                        }
                         crate::framebuffer::clear(0x000000);
                         crate::framebuffer::reset_cursor();
                         return; // Esc → shell (from anywhere)
                     }
-                    if desk.top_is_terminal() {
+                    if desk.files_naming_active() {
+                        // The Files naming modal captures typing.
+                        match scancode {
+                            0x0E => {
+                                desk.files_name_buf.pop();
+                                desk.mark_top_window();
+                            }
+                            0x1C => desk.files_commit_name(),
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    if desk.files_name_buf.len() < 32 {
+                                        desk.files_name_buf.push(c);
+                                        desk.mark_top_window();
+                                    }
+                                }
+                            }
+                        }
+                    } else if desk.top_is_terminal() {
                         // Focused Terminal captures typing.
                         match scancode {
                             0x0E => {
@@ -1092,23 +1429,54 @@ pub fn run_demo() {
                                 }
                             }
                         }
+                    } else if desk.top_is_editor() {
+                        // Focused Text Editor edits its buffer.
+                        match scancode {
+                            0x0E => {
+                                desk.editor_buf.pop();
+                                desk.mark_top_window();
+                            } // Backspace
+                            0x1C => {
+                                desk.editor_buf.push('\n');
+                                desk.mark_top_window();
+                            } // Enter → newline
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    if desk.editor_buf.len() < 32 * 1024 {
+                                        desk.editor_buf.push(c);
+                                        desk.mark_top_window();
+                                    }
+                                }
+                            }
+                        }
                     } else {
-                        // Desktop shortcuts when no terminal is focused.
+                        // Desktop shortcuts when no text-entry window is focused. When Files is the
+                        // focused window, letter keys drive its file-manager operations (a real
+                        // keyboard-driven file manager); app-switch numbers + t/w still work.
+                        let files_focused =
+                            desk.wins.last().map_or(false, |w| w.kind == AppKind::Files);
                         match scancode {
                             0x14 => {
                                 desk.theme = desk.theme.toggled();
                                 desk.mark_full();
                             } // t
-                            0x02 => desk.open_app(AppKind::Terminal), // 1
-                            0x03 => desk.open_app(AppKind::Files),    // 2
-                            0x04 => desk.open_app(AppKind::Quantum),  // 3
-                            0x05 => desk.open_app(AppKind::Monitor),  // 4
-                            0x06 => desk.open_app(AppKind::Settings), // 5
+                            s @ 0x02..=0x07 => {
+                                // Number keys 1–6 open the dock apps in order.
+                                let idx = (s - 0x02) as usize;
+                                if idx < APPS.len() {
+                                    desk.open_app(APPS[idx]);
+                                }
+                            }
                             0x11 => {
                                 if desk.wins.pop().is_some() {
                                     desk.mark_full();
                                 }
                             } // w → close focused
+                            0x31 if files_focused => desk.files_tool(0), // n → New File
+                            0x25 if files_focused => desk.files_tool(1), // k → New Dir
+                            0x13 if files_focused => desk.files_tool(2), // r → Rename (selection)
+                            0x2D if files_focused => desk.files_tool(3), // x → Delete (selection)
+                            0x12 if files_focused => desk.files_tool(4), // e → Edit (selection)
                             _ => {}
                         }
                     }
