@@ -120,9 +120,11 @@ host-tested.
     minute-rollover refresh); Files listing **scrolls** with an above/below indicator; number keys
     `1`–`9` open apps. Verified in QEMU (0-fault, screenshots): 12+34=46, full PCI list, live
     Processes, theme cards, real clock.
-  - [ ] **Next (step 5 cont.):** deepen the quantum layer (visual circuit editor, RX/RY/RZ,
-    histogram — MASTERPLAN E-80); optional later: image viewer, wallpaper choices, window resize
-    by edge drag, notifications.
+  - **Quantum Lab grew into a real circuit editor** — engine + editor + histogram now tracked in
+    **WP-06 (quantum control plane)** with ADR-0019; CPU security hardening (NX/WP/SMEP/SMAP +
+    Settings Security row) in ADR-0020.
+  - [ ] **Next (step 5 cont., UI side):** window resize by edge drag; wallpaper choices;
+    notifications; image viewer.
 
 ## Acceptance criteria
 
