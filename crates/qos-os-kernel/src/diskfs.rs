@@ -3,10 +3,8 @@ extern crate alloc;
 use alloc::vec::Vec;
 use alloc::string::ToString;
 
-use crate::ata::{AtaPio, DriveSelect};
-
-// Very small, safe-on-disk format for a dedicated workspace image (target/qos-fs.img).
-// Only intended for QEMU IDE index=1 (primary slave).
+// QOSFS: a tiny on-disk format for a dedicated workspace image. Sectors are read/written through
+// the modern AHCI/SATA driver (ADR-0018) — the legacy ATA-PIO path is retired for this fs.
 //
 // Layout (LBA28):
 // - LBA 0: Superblock
@@ -88,16 +86,12 @@ impl DirEntry {
     }
 }
 
-fn disk() -> AtaPio {
-    AtaPio::primary(DriveSelect::Slave)
-}
-
 fn read_sector(lba: u32, out: &mut [u8; 512]) -> bool {
-    disk().read_sector28(lba, out)
+    crate::ahci::read_sector(lba as u64, out)
 }
 
 fn write_sector(lba: u32, data: &[u8; 512]) -> bool {
-    disk().write_sector28(lba, data)
+    crate::ahci::write_sector(lba as u64, data)
 }
 
 fn read_superblock() -> Option<Superblock> {

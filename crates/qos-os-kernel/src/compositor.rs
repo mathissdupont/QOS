@@ -276,6 +276,10 @@ impl Terminal {
                     "  touch <file>    create an empty file",
                     "  write <f> <tx>  write text to a file",
                     "  rm <path>       remove a file or empty dir",
+                    "  disk / dformat  SATA disk status / format (QOSFS)",
+                    "  dls / dcat <n>  list / print a disk file",
+                    "  dsave <f>       copy a fs file onto the disk (persists)",
+                    "  dload <n>       copy a disk file into the fs",
                     "  bell            2-qubit Bell state, 1000 shots",
                     "  ghz             3-qubit GHZ state, 1000 shots",
                     "  qrng [n]        n quantum random bits (default 8)",
@@ -353,6 +357,86 @@ impl Terminal {
                         }
                     }
                     _ => self.push("usage: write <file> <text>".to_string()),
+                }
+            }
+            "disk" => {
+                if !crate::ahci::present() {
+                    self.push("disk: no SATA disk attached".to_string());
+                } else {
+                    let sec = crate::ahci::capacity_sectors();
+                    let fmt = crate::diskfs::is_formatted();
+                    self.push(format!("disk: SATA, {} sectors (~{} MiB), {}",
+                        sec, sec * 512 / 1024 / 1024, if fmt { "QOSFS formatted" } else { "unformatted (run dformat)" }));
+                }
+            }
+            "dformat" => {
+                if !crate::ahci::present() {
+                    self.push("dformat: no disk".to_string());
+                } else if crate::diskfs::mkfs() {
+                    self.push("disk formatted (QOSFS)".to_string());
+                } else {
+                    self.push("dformat: failed".to_string());
+                }
+            }
+            "dls" => {
+                if !crate::diskfs::is_formatted() {
+                    self.push("dls: disk not formatted (run dformat)".to_string());
+                } else {
+                    let entries = crate::diskfs::get_entries(b"");
+                    if entries.is_empty() {
+                        self.push("(disk empty)".to_string());
+                    }
+                    for (name, _is_dir, size) in entries {
+                        self.push(format!("  {}   {} B", name, size));
+                    }
+                }
+            }
+            "dcat" => {
+                if rest.is_empty() {
+                    self.push("usage: dcat <name>".to_string());
+                } else {
+                    match crate::diskfs::read(rest.as_bytes()) {
+                        Some(bytes) => {
+                            let text = String::from_utf8_lossy(&bytes);
+                            for line in text.split('\n') {
+                                self.push(line.to_string());
+                            }
+                        }
+                        None => self.push(format!("dcat: not found on disk: {}", rest)),
+                    }
+                }
+            }
+            "dsave" => {
+                // Copy a RAM-fs file (resolved against cwd) onto the persistent disk (flat name).
+                if rest.is_empty() {
+                    self.push("usage: dsave <file>   (RAM fs -> disk)".to_string());
+                } else {
+                    let path = if self.cwd.is_empty() { rest.to_string() } else { format!("{}/{}", self.cwd, rest) };
+                    let base = rest.rsplit('/').next().unwrap_or(rest);
+                    match crate::fs::read(path.as_bytes()) {
+                        Some(bytes) => match crate::diskfs::write(base.as_bytes(), &bytes) {
+                            Ok(()) => self.push(format!("saved {} ({} B) to disk", base, bytes.len())),
+                            Err(e) => self.push(format!("dsave: {}", e)),
+                        },
+                        None => self.push(format!("dsave: no such fs file: {}", rest)),
+                    }
+                }
+            }
+            "dload" => {
+                // Copy a disk file into the RAM fs (into the current dir).
+                if rest.is_empty() {
+                    self.push("usage: dload <name>   (disk -> RAM fs)".to_string());
+                } else {
+                    match crate::diskfs::read(rest.as_bytes()) {
+                        Some(bytes) => {
+                            let path = if self.cwd.is_empty() { rest.to_string() } else { format!("{}/{}", self.cwd, rest) };
+                            match crate::fs::write(path.as_bytes(), &bytes) {
+                                Ok(()) => self.push(format!("loaded {} ({} B) into /{}", rest, bytes.len(), path)),
+                                Err(e) => self.push(format!("dload: {}", e)),
+                            }
+                        }
+                        None => self.push(format!("dload: not found on disk: {}", rest)),
+                    }
                 }
             }
             "echo" => self.push(rest.to_string()),
@@ -1128,8 +1212,14 @@ impl Desktop {
                 y += 12;
                 fr.draw_text(s, bx, y, "Storage", 15.0, theme.accent);
                 y += 24;
-                let fat = crate::fat16::is_fat16();
-                fr.draw_text(s, bx + 8, y, &format!("RAM fs active   -   FAT16 disk: {}", if fat { "present" } else { "none attached" }), 14.0, theme.text_dim);
+                let disk_line = if crate::ahci::present() {
+                    let mib = crate::ahci::capacity_sectors() * 512 / 1024 / 1024;
+                    let fmt = if crate::diskfs::is_formatted() { "QOSFS" } else { "unformatted" };
+                    format!("RAM fs active   -   SATA disk: {} MiB ({})", mib, fmt)
+                } else {
+                    "RAM fs active   -   SATA disk: none attached".to_string()
+                };
+                fr.draw_text(s, bx + 8, y, &disk_line, 14.0, theme.text_dim);
             }
             AppKind::Settings => {
                 fr.draw_text(s, bx, by, "Appearance", 16.0, theme.text);
