@@ -102,10 +102,16 @@ host-tested.
     row shows real capacity + format state. **Two-boot persistence verified in QEMU (0-fault):**
     boot #1 `dformat` + `dsave note.txt`; boot #2 reports "QOSFS formatted", `dls` lists it, `dcat`
     prints the exact contents — files survive reboots.
-  - [ ] **Next (step 5 cont.):** show the persistent disk inside the **Files app** (a "Disk"
-    location next to the RAM fs, or a VFS mount); more apps (calculator, devices/network panel,
-    process viewer); deepen the quantum layer (visual circuit editor, RX/RY/RZ, histogram —
-    MASTERPLAN E-80).
+  - **Persistent disk inside Files + keyboard navigation.** A "Disk (SATA)" location at the RAM-fs
+    root enters `disk:/` (flat QOSFS listing; `..` returns). All ops work there (New File / Delete /
+    Rename via read+write+remove / Edit; New Dir explains the fs is flat); pseudo-entries are
+    guarded. The Text Editor understands `disk:` paths (open + Save hit the persistent disk).
+    **Up/Down/Enter** navigate rows — Files is fully usable without a mouse. Verified in QEMU
+    (0-fault) against the previously-persisted image: keyboard-only entry into the disk, note.txt
+    previews its persisted contents, `e` opens it as `disk:note.txt` in the editor.
+  - [ ] **Next (step 5 cont.):** more apps (calculator, devices/network panel, process viewer);
+    Files listing scroll (rows beyond `FILES_MAX_ROWS` are hidden); deepen the quantum layer
+    (visual circuit editor, RX/RY/RZ, histogram — MASTERPLAN E-80).
 
 ## Acceptance criteria
 
