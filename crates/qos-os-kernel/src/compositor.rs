@@ -767,7 +767,7 @@ impl Terminal {
                     match crate::fs::read(path.as_bytes()) {
                         None => self.push(format!("qasm: cannot read /{}", path)),
                         Some(bytes) => match crate::quantum::parser::parse_qasm2(&bytes) {
-                            Err(e) => self.push(format!("qasm: parse error: {:?}", e)),
+                            Err(e) => self.push(format!("qasm: {}", e.message())),
                             Ok(prog) => {
                                 let before = prog.instructions.len();
                                 let (opt, removed) =
@@ -912,7 +912,9 @@ struct Desktop {
     qasm_cur: (usize, usize),
     qasm_path: Option<String>,
     qasm_status: String,
-    qasm_problem: Option<String>,
+    /// Active problem: (1-based source line or 0 for program-level, message). Drives the (!)
+    /// problems row, the red gutter marker, and click-to-jump.
+    qasm_problem: Option<(usize, String)>,
     qasm_preview: Option<(usize, Vec<crate::quantum::parser::Instruction>)>,
     qasm_result: Vec<(String, u64)>,
 }
@@ -1153,6 +1155,26 @@ impl Desktop {
                         self.qasm_open(Some(f), content);
                         return;
                     }
+                }
+                // Problems row: click jumps to the offending line.
+                if self.qasm_problem.is_some() && qasm_preview_rect(wr).contains(cx, cy) {
+                    self.qasm_goto_problem();
+                    return;
+                }
+                // Code pane: click-to-position (line exact; column from the average glyph
+                // advance ≈7 px at 13 pt — refined once per-glyph metrics are exposed here).
+                let code = qasm_code_rect(wr);
+                if code.contains(cx, cy) {
+                    let line_h = 18;
+                    let max_rows = ((code.h - 12) / line_h).max(1) as usize;
+                    let (cl, _) = self.qasm_cur;
+                    let first = if cl >= max_rows { cl + 1 - max_rows } else { 0 };
+                    let row = ((cy - code.y - 6).max(0) / line_h) as usize;
+                    let l = (first + row).min(self.qasm_lines.len().saturating_sub(1));
+                    let approx_col = ((cx - code.x - 34).max(0) / 7) as usize;
+                    let col = approx_col.min(self.qasm_lines[l].chars().count());
+                    self.qasm_cur = (l, col);
+                    self.mark_top_window();
                 }
             }
             AppKind::Terminal | AppKind::Monitor | AppKind::Devices | AppKind::Processes => {}
@@ -1636,7 +1658,7 @@ impl Desktop {
         let text = self.qasm_text();
         if text.len() > 16 * 1024 {
             self.qasm_preview = None;
-            self.qasm_problem = Some("source too large for live preview".to_string());
+            self.qasm_problem = Some((0, "source too large for live preview".to_string()));
             return;
         }
         match parser::parse_qasm2(text.as_bytes()) {
@@ -1646,11 +1668,22 @@ impl Desktop {
             }
             Ok(prog) => {
                 self.qasm_preview = None;
-                self.qasm_problem = Some(format!("qubit count {} out of range", prog.n_qubits));
+                self.qasm_problem = Some((0, format!("qubit count {} out of range", prog.n_qubits)));
             }
             Err(e) => {
                 self.qasm_preview = None;
-                self.qasm_problem = Some(format!("{:?}", e));
+                self.qasm_problem = Some((e.line, e.message()));
+            }
+        }
+    }
+
+    /// Jump the cursor to the active problem's line (problems-row click / keyboard).
+    fn qasm_goto_problem(&mut self) {
+        if let Some((line, _)) = &self.qasm_problem {
+            if *line > 0 {
+                let l = (*line - 1).min(self.qasm_lines.len().saturating_sub(1));
+                self.qasm_cur = (l, 0);
+                self.mark_top_window();
             }
         }
     }
@@ -1775,7 +1808,7 @@ impl Desktop {
                     };
                 }
             }
-            Err(e) => self.qasm_status = format!("parse error: {:?}", e),
+            Err(e) => self.qasm_status = format!("error — {}", e.message()),
         }
         self.mark_top_window();
     }
@@ -1799,7 +1832,7 @@ impl Desktop {
                     None => self.qasm_status = "error: qubit count out of range".to_string(),
                 }
             }
-            Err(e) => self.qasm_status = format!("parse error: {:?}", e),
+            Err(e) => self.qasm_status = format!("error — {}", e.message()),
         }
         self.mark_top_window();
     }
@@ -2263,6 +2296,7 @@ impl Desktop {
                 let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
                 let key_col = qos_ui::rgb(0x7a, 0xc8, 0xb0);
                 let mut ty = code.y + 20;
+                let problem_line = self.qasm_problem.as_ref().map(|(l, _)| *l).unwrap_or(0);
                 for (li, line) in self.qasm_lines.iter().enumerate().skip(first).take(max_rows) {
                     if li == cl {
                         // Current-line highlight bar.
@@ -2270,7 +2304,9 @@ impl Desktop {
                     }
                     let num = format!("{}", li + 1);
                     let nw = fr.text_width(&num, 11.0);
-                    fr.draw_text(s, code.x + gutter - 8 - nw, ty, &num, 11.0, theme.text_dim);
+                    // The problem line's number turns red (VS Code-style gutter marker).
+                    let num_col = if problem_line == li + 1 { qos_ui::rgb(0xe0, 0x60, 0x50) } else { theme.text_dim };
+                    fr.draw_text(s, code.x + gutter - 8 - nw, ty, &num, 11.0, num_col);
                     let col = if line.starts_with("OPENQASM") || line.starts_with("qreg") || line.starts_with("creg") || line.starts_with("measure") || line.starts_with("include") {
                         key_col
                     } else {
@@ -2290,9 +2326,12 @@ impl Desktop {
                 let pv = qasm_preview_rect(r);
                 s.rounded_rect(pv, 8, theme.surface_alt);
                 match (&self.qasm_problem, &self.qasm_preview) {
-                    (Some(p), _) => {
+                    (Some((pline, msg)), _) => {
                         fr.draw_text(s, pv.x + 10, pv.y + 20, "(!)", 13.0, qos_ui::rgb(0xe0, 0x60, 0x50));
-                        fr.draw_text(s, pv.x + 36, pv.y + 20, p, 12.0, theme.text);
+                        fr.draw_text(s, pv.x + 36, pv.y + 20, msg, 12.0, theme.text);
+                        if *pline > 0 {
+                            fr.draw_text(s, pv.x + 36, pv.y + 40, "click here (or F8) to jump to the line", 11.0, theme.text_dim);
+                        }
                     }
                     (None, Some((nq, instrs))) => {
                         let shown_q = (*nq).min(4);
@@ -3119,6 +3158,7 @@ pub fn run_demo() {
                             0x3E => desk.qasm_compile(),      // F4
                             0x3F => desk.qasm_run_buf(),      // F5
                             0x3C => desk.qasm_save(),         // F2
+                            0x42 => desk.qasm_goto_problem(), // F8 → jump to problem line
                             0x48 => desk.qasm_move(0, -1),    // Up
                             0x50 => desk.qasm_move(0, 1),     // Down
                             0x4B => desk.qasm_move(-1, 0),    // Left

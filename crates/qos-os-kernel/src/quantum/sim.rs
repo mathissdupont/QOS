@@ -396,7 +396,9 @@ pub static SIM_JOBS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU
 pub fn run_qasm2(qasm: &[u8], shots: u64) -> Result<SimResult, super::parser::ParseError> {
     let program = super::parser::parse_qasm2(qasm)?;
     if program.n_qubits == 0 || program.n_qubits > MAX_QUBITS {
-        return Err(super::parser::ParseError::QubitOutOfRange(program.n_qubits, MAX_QUBITS));
+        return Err(super::parser::ParseError::program(
+            super::parser::ParseErrorKind::QubitOutOfRange(program.n_qubits, MAX_QUBITS),
+        ));
     }
     let mut sim = Simulator::new(program.n_qubits);
     SIM_JOBS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
