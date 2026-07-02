@@ -61,11 +61,25 @@ host-tested.
   QEMU (screenshots): apps open via keys with distinct content, focus ring + dock dots, cursor
   tracks mouse motion, and both light + dark themes render at native 1280×800. (Full generic
   `Widget` trait/toolkit deferred; the WM covers the needed interactions.)
-- [~] **Step 5 — Apps (E-73).** (Terminal DONE) A real in-window terminal: scrollback + input,
-  Set-1 scancode→char with Shift, focus-based key routing, dirty-only-the-window redraw. Commands
-  hit real subsystems — `bell`/`ghz`/`qrng` run the actual `quantum::sim` simulator and print
-  measurement counts (verified: `bell` → `00 -> 495  11 -> 505`), plus help/clear/echo/ver/mem.
-  (Todo) Files → real FAT16, Quantum Lab → dedicated circuit runner, Settings → real/persistent.
+- [~] **Step 5 — Apps (E-73).** Five functional apps in the compositor WM:
+  - **Terminal** — scrollback + input, Set-1 scancode→char with Shift, focus-based key routing,
+    dirty-only-window redraw. `help/clear/echo/ver/mem` + `bell`/`ghz`/`qrng` run the real
+    `quantum::sim` (verified `bell` → `00->495 11->505`).
+  - **Files** — browses the real in-kernel fs (`fs::get_entries`); click dir to enter, `..` up,
+    file to preview text. (Only the RAM fs so far — see "next".)
+  - **Quantum Lab** — Run Bell / Run GHZ buttons → real simulator → measurement counts (verified
+    click → `00->495 11->505`).
+  - **System Monitor** — live RTC time + uptime, real kernel-heap used/total + bar, USB HID counts
+    (`xhci::hid_device_counts`), real PCI device list (`pci::devices`), storage status; refreshes
+    ~1 Hz while focused.
+  - **Settings** — clickable light/dark toggle + live system info.
+  Shared click geometry (`files_row_rect`/`qlab_btn_rect`/`settings_theme_rect`) drives draw +
+  hit-test; `on_body_click` dispatches. **USB mouse fix:** `process_mouse_report` now diffs the
+  button byte → real press AND release (fixed clicks + drag-release).
+  - [ ] **Next (step 5 cont.):** attach a real data disk to QEMU + make **Files browse real
+    ATA/FAT16** (the "hard disk"); a **Text Editor** (open/edit/save via `fs`/`vfs`); full file
+    manager ops (new/delete/rename/copy — all already in `fs`/`vfs`, just wire the UI); more apps
+    (calculator, devices/network panel, process viewer).
 
 ## Acceptance criteria
 
