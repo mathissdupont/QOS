@@ -3,7 +3,7 @@
 - Status: 🟡 in progress
 - Epic: E-80 (quantum control plane), E-73 (apps)
 - ADRs: ADR-0021 (in-OS QASM toolchain)
-- Commits: (appended as delivered)
+- Commits: 78ee1ef (slice 1: editing core + sidebar + live preview)
 
 ## Goal
 
@@ -15,11 +15,17 @@ teletype.
 
 ## Steps (verified slices)
 
-- [ ] **Slice 1 — editing core + layout.** Line-based buffer (`Vec<String>`) with a real cursor
-  (arrows/Home-ish navigation, insert/delete/split at the cursor), line-number gutter,
-  current-line highlight, scroll-to-cursor; VS Code-style layout: sidebar (workspace `.qasm`
-  files, click to open), code pane, live circuit preview strip (reparsed on each edit; parse
-  errors show a problem marker), status bar. Larger default window for the IDE.
+- [x] **Slice 1 — editing core + layout.** Line-based buffer (`Vec<String>`) with a real cursor:
+  arrow navigation (column clamping, line-end wrapping), insert/backspace/newline **at the
+  cursor** (UTF-8-safe), 32 KiB cap; line-number gutter, current-line highlight, accent caret,
+  scroll-to-cursor. VS Code layout in a 760×560 window: EXPLORER sidebar (workspace `.qasm`
+  files, open-file highlight, click to open), code pane with keyword tinting, **live circuit
+  preview** (reparse on every edit → wire diagram with gate boxes / CX dot+target / M markers;
+  parse problems as an inline `(!)` row; last run counts right-aligned), status bar with
+  compiler status + `Ln X, Col Y`. Verified in QEMU (0-fault): caret/status agree after
+  mid-buffer edits; inserting `z q[0];` updates the preview instantly and F5 gives the
+  physically correct unchanged Bell split (Z = phase only). A transient caret/status mismatch
+  was diagnosed as a torn-frame screendump (screenshot raced the framebuffer blit), not a bug.
 - [ ] **Slice 2 — problems + navigation.** Parser line numbers (extend `ParseError`), a problems
   panel listing errors with their line, click-to-jump; click-to-position in the code pane.
 - [ ] **Slice 3 — shared editing core.** Factor the editing core out (module or `qos-ui`) and

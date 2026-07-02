@@ -41,10 +41,14 @@ bars: security, performance, UX/UI quality (user directive 2026-07-02).
   number keys 1–9,0 open all ten apps. Verified in QEMU (0-fault, screenshots): F4/F5/F2 loop
   (Bell 505/495; `draft.qasm` 102 B saved), Lab→Studio GHZ export, Terminal
   `qasm quantum/bell.qasm` → "2 -> 2 gates (0 cancelled), depth 2" + 529/471.
-- [ ] **Next:** parser line numbers for compile errors; rotation-merge pass (RZ·RZ→RZ); QASM
-  import into the visual Lab (code → circuit); controlled rotations (CRZ/CP); measurement/reset
-  in the editor; a real text-editing core (cursor/selection) shared by Studio + Text Editor;
-  noise models; QHAL backend abstraction (MASTERPLAN E-80).
+- [ ] **Next (engine/back-end scope — this WP):** rotation-merge pass (RZ·RZ→RZ); controlled
+  rotations (CRZ/CP); measurement/reset placement in the visual Lab; parser line numbers for
+  compile errors (shared prerequisite with WP-07); noise models; QHAL backend abstraction
+  (MASTERPLAN E-80).
+- **Scope note:** the *editor/IDE* items formerly listed here (real text-editing core with a
+  cursor, file sidebar, live circuit preview, problems panel) moved to **WP-07 (Quantum IDE)**,
+  opened 2026-07-02 on the user's "VS Code-like environment" directive. WP-06 stays 🟡 and
+  continues in parallel — it is done only when the engine roadmap above ships.
 
 ## Acceptance criteria
 
