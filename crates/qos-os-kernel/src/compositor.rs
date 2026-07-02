@@ -35,17 +35,31 @@ enum AppKind {
     Terminal,
     Files,
     Quantum,
+    Monitor,
     Settings,
 }
 
-const APPS: [AppKind; 4] = [AppKind::Terminal, AppKind::Files, AppKind::Quantum, AppKind::Settings];
+const APPS: [AppKind; 5] = [AppKind::Terminal, AppKind::Files, AppKind::Quantum, AppKind::Monitor, AppKind::Settings];
 
 fn app_title(k: AppKind) -> &'static str {
     match k {
         AppKind::Terminal => "Terminal",
         AppKind::Files => "Files",
         AppKind::Quantum => "Quantum Lab",
+        AppKind::Monitor => "System Monitor",
         AppKind::Settings => "Settings",
+    }
+}
+
+/// A distinct single-letter glyph for the dock icon (title initials collide: both System Monitor
+/// and Settings start with "S").
+fn app_dock_letter(k: AppKind) -> &'static str {
+    match k {
+        AppKind::Terminal => "T",
+        AppKind::Files => "F",
+        AppKind::Quantum => "Q",
+        AppKind::Monitor => "M",
+        AppKind::Settings => "S",
     }
 }
 
@@ -54,6 +68,7 @@ fn app_tint(k: AppKind, theme: &Theme) -> qos_ui::Rgb {
         AppKind::Terminal => theme.accent,
         AppKind::Files => qos_ui::rgb(0x30, 0xb0, 0x60),
         AppKind::Quantum => qos_ui::rgb(0x8a, 0x5c, 0xd8),
+        AppKind::Monitor => qos_ui::rgb(0x27, 0xa8, 0xc8),
         AppKind::Settings => qos_ui::rgb(0xe0, 0x7a, 0x2a),
     }
 }
@@ -273,8 +288,8 @@ impl Desktop {
     fn new(w: i32, h: i32) -> Self {
         // Start with two cascaded windows so the desktop looks alive.
         let wins = vec![
-            Win { rect: Rect::new(w / 2 - 440, 84, 540, 400), kind: AppKind::Terminal },
-            Win { rect: Rect::new(w / 2 - 40, 250, 520, 400), kind: AppKind::Files },
+            Win { rect: Rect::new(w / 2 - 440, 74, 540, 440), kind: AppKind::Terminal },
+            Win { rect: Rect::new(w / 2 - 40, 230, 520, 440), kind: AppKind::Files },
         ];
         Desktop {
             w,
@@ -334,7 +349,7 @@ impl Desktop {
                     self.mark_full();
                 }
             }
-            AppKind::Terminal => {}
+            AppKind::Terminal | AppKind::Monitor => {}
         }
     }
 
@@ -404,6 +419,11 @@ impl Desktop {
         self.wins.last().map_or(false, |w| w.kind == AppKind::Terminal)
     }
 
+    /// True if the focused window is the System Monitor — used to refresh it live.
+    fn top_is_monitor(&self) -> bool {
+        self.wins.last().map_or(false, |w| w.kind == AppKind::Monitor)
+    }
+
     /// Mark just the focused window's footprint (plus shadow) dirty — used for terminal typing so a
     /// keystroke doesn't repaint the whole screen.
     fn mark_top_window(&mut self) {
@@ -454,7 +474,7 @@ impl Desktop {
             self.wins.push(win); // raise
         } else {
             let n = self.wins.len() as i32;
-            let rect = Rect::new((self.w / 2 - 270 + n * 28).max(20), (96 + n * 28).min(self.h - 420), 540, 400);
+            let rect = Rect::new((self.w / 2 - 270 + n * 28).max(20), (80 + n * 24).min(self.h - 460), 540, 440);
             self.wins.push(Win { rect, kind });
         }
         self.mark_full();
@@ -622,6 +642,53 @@ impl Desktop {
                     ry += 20;
                 }
             }
+            AppKind::Monitor => {
+                let mut y = by;
+                // System: real RTC time + APIC-tick uptime.
+                let dt = crate::rtc::read_datetime();
+                let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                fr.draw_text(s, bx, y, "System", 15.0, theme.accent);
+                y += 24;
+                fr.draw_text(s, bx + 8, y, &format!("time    {:04}-{:02}-{:02} {:02}:{:02}:{:02}", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second), 14.0, theme.text);
+                y += 20;
+                fr.draw_text(s, bx + 8, y, &format!("uptime  {} s   ({} ticks)", ticks / 100, ticks), 14.0, theme.text);
+                y += 30;
+
+                // Memory: real kernel-heap usage + a bar.
+                let (used, total) = crate::allocator::heap_stats();
+                fr.draw_text(s, bx, y, "Memory (kernel heap)", 15.0, theme.accent);
+                y += 24;
+                fr.draw_text(s, bx + 8, y, &format!("used {} KiB / {} MiB", used / 1024, total / 1024 / 1024), 14.0, theme.text);
+                y += 20;
+                let barw = r.w - 64;
+                s.rounded_rect(Rect::new(bx + 8, y, barw, 10), 5, theme.surface_alt);
+                let fillw = if total > 0 { (barw as u64 * used as u64 / total as u64) as i32 } else { 0 };
+                if fillw > 0 {
+                    s.rounded_rect(Rect::new(bx + 8, y, fillw.max(4), 10), 5, theme.accent);
+                }
+                y += 30;
+
+                // Input: live USB HID device counts.
+                let (kbd, mice) = crate::xhci::hid_device_counts();
+                fr.draw_text(s, bx, y, "Input (USB HID)", 15.0, theme.accent);
+                y += 24;
+                fr.draw_text(s, bx + 8, y, &format!("{} keyboard(s), {} mouse/mice", kbd, mice), 14.0, theme.text);
+                y += 30;
+
+                // PCI devices (real enumeration) + storage status.
+                let devs = crate::pci::devices();
+                fr.draw_text(s, bx, y, &format!("PCI devices ({})", devs.len()), 15.0, theme.accent);
+                y += 24;
+                for d in devs.iter().take(4) {
+                    fr.draw_text(s, bx + 8, y, &format!("{:04x}:{:04x}  {}  {}", d.vendor_id, d.device_id, crate::pci::vendor_name(d.vendor_id), d.class_name()), 13.0, theme.text_dim);
+                    y += 19;
+                }
+                y += 12;
+                fr.draw_text(s, bx, y, "Storage", 15.0, theme.accent);
+                y += 24;
+                let fat = crate::fat16::is_fat16();
+                fr.draw_text(s, bx + 8, y, &format!("RAM fs active   -   FAT16 disk: {}", if fat { "present" } else { "none attached" }), 14.0, theme.text_dim);
+            }
             AppKind::Settings => {
                 fr.draw_text(s, bx, by, "Appearance", 16.0, theme.text);
                 let tr = settings_theme_rect(r);
@@ -674,7 +741,7 @@ impl Desktop {
         for (i, &kind) in APPS.iter().enumerate() {
             let ir = self.dock_icon_rect(i as i32);
             s.rounded_rect(ir, 12, app_tint(kind, theme));
-            let initial = &app_title(kind)[..1];
+            let initial = app_dock_letter(kind);
             let iw = fr.text_width(initial, 22.0);
             fr.draw_text(s, ir.x + (ir.w - iw) / 2, ir.y + ir.h / 2 + 8, initial, 22.0, qos_ui::rgb(0xff, 0xff, 0xff));
             if self.wins.iter().any(|win| win.kind == kind) {
@@ -984,6 +1051,7 @@ pub fn run_demo() {
     desk.full = false;
     desk.damage = Rect::new(0, 0, 0, 0);
     let mut shift = false;
+    let mut last_refresh = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
@@ -1034,7 +1102,8 @@ pub fn run_demo() {
                             0x02 => desk.open_app(AppKind::Terminal), // 1
                             0x03 => desk.open_app(AppKind::Files),    // 2
                             0x04 => desk.open_app(AppKind::Quantum),  // 3
-                            0x05 => desk.open_app(AppKind::Settings), // 4
+                            0x05 => desk.open_app(AppKind::Monitor),  // 4
+                            0x06 => desk.open_app(AppKind::Settings), // 5
                             0x11 => {
                                 if desk.wins.pop().is_some() {
                                     desk.mark_full();
@@ -1055,6 +1124,14 @@ pub fn run_demo() {
                 _ => {}
             }
         }
+        // Live refresh: if the System Monitor is focused, repaint its window ~once a second so its
+        // clock / memory / uptime stay current.
+        let now_ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
+        if desk.top_is_monitor() && now_ticks - last_refresh >= 100 {
+            last_refresh = now_ticks;
+            desk.mark_top_window();
+        }
+
         if desk.dirty {
             // Scene changed. For a drag, confine BOTH the recompose (RAM) and the blit (slow
             // framebuffer MMIO) to the damage rect — the union of old+new window footprints plus

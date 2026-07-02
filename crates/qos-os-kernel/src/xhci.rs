@@ -943,6 +943,18 @@ pub fn on_interrupt() {
     }
 }
 
+/// Count configured HID devices by kind: `(keyboards, mice)`. For the System Monitor app.
+pub fn hid_device_counts() -> (usize, usize) {
+    if let Some(guard) = CONTROLLER.try_lock() {
+        if let Some(ctrl) = guard.as_ref() {
+            let kbd = ctrl.hid_devices.iter().filter(|d| d.kind == 1).count();
+            let mouse = ctrl.hid_devices.iter().filter(|d| d.kind == 2).count();
+            return (kbd, mouse);
+        }
+    }
+    (0, 0)
+}
+
 fn read64_lo_hi_write(io: &mut dyn DeviceIo, addr: u64, val: u64) {
     io.mmio_write32(addr, val as u32);
     io.mmio_write32(addr + 4, (val >> 32) as u32);

@@ -49,6 +49,12 @@ pub fn init_heap(
     Ok(())
 }
 
+/// Current heap usage as `(used_bytes, total_bytes)` — surfaced by the System Monitor app.
+pub fn heap_stats() -> (usize, usize) {
+    let h = ALLOCATOR.lock();
+    (h.used(), HEAP_SIZE)
+}
+
 #[alloc_error_handler]
 fn alloc_error(layout: Layout) -> ! {
     panic!("allocation error: {:?}", layout)
