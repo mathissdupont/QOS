@@ -88,10 +88,14 @@ host-tested.
     `editor_btn_rect`. Verified in QEMU (0-fault, screenshots): keyboard New File → `hello.txt`,
     New Dir → `docs/`, both appear in the refreshed, correctly-sorted listing; Editor renders +
     accepts typing.
-  - [ ] **Next (step 5 cont.):** attach a real **persistent data disk** to QEMU + make **Files
-    browse real ATA/FAT16 or diskfs** (the "hard disk" — `ata`/`diskfs` exist; QEMU q35 needs an
-    IDE/AHCI wiring decision since the PIO driver targets legacy ports 0x1F0); add **fs commands to
-    the Terminal** (ls/cat/mkdir/rm/touch — makes it a real shell); more apps (calculator,
+  - **Terminal is a real shell.** Over the same in-kernel fs (one filesystem shared with the Files
+    GUI — a change in one shows in the other): `ls`/`cd`/`cat`/`mkdir`/`touch`/`write`/`rm`/`pwd`,
+    with a working directory, a `.`/`..`/absolute-path `resolve()`, and a cwd-aware prompt (plus the
+    existing quantum `bell`/`ghz`/`qrng`). Verified in QEMU (0-fault): `write a.txt hello world` →
+    `ls` shows it → `cat` prints it back; `cd` validates the target.
+  - [ ] **Next (step 5 cont.):** attach a real **persistent data disk** to QEMU + make **Files/shell
+    browse real ATA/diskfs** (the "hard disk" — `ata`/`diskfs` exist; QEMU q35 needs an IDE/AHCI
+    wiring decision since the PIO driver targets legacy ports 0x1F0); more apps (calculator,
     devices/network panel, process viewer); deepen the quantum layer (visual circuit editor,
     RX/RY/RZ, histogram — MASTERPLAN E-80).
 
