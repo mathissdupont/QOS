@@ -81,12 +81,28 @@ Copy-Item $ovmfCode $codeCopy -Force
 Copy-Item $ovmfVars $varsCopy -Force
 Set-ItemProperty -Path $varsCopy -Name IsReadOnly -Value $false
 
+# Persistent SATA data disk (ADR-0018): a raw image on a dedicated AHCI HBA, separate from the boot
+# volume. It lives in the ASCII-only work dir (the repo path contains non-ASCII "Masaüstü", which
+# corrupts QEMU argv) and is created only once, so its contents SURVIVE across runs — this is the
+# "hard disk". Delete it to reformat: Remove-Item "$env:TEMP\qos-run-uefi\qos-data.img".
+$dataCopy = Join-Path $work 'qos-data.img'
+if (-not (Test-Path $dataCopy)) {
+    $fs = New-Object System.IO.FileStream($dataCopy, [IO.FileMode]::CreateNew)
+    $fs.SetLength(16MB); $fs.Close()
+    Write-Host "Created persistent data disk: $dataCopy (16 MiB, blank)" -ForegroundColor Cyan
+}
+
 $qemu  = Find-Qemu
 $qargs = @(
     '-machine', 'q35',
     '-drive', "if=pflash,unit=0,format=raw,readonly=on,file=$codeCopy",
     '-drive', "if=pflash,unit=1,format=raw,file=$varsCopy",
     '-drive', "format=raw,file=$bootImg",
+    # Persistent data disk on a dedicated AHCI controller (ADR-0018). Uses the ASCII-safe work dir
+    # copy; see the note below about persisting it back.
+    '-device', 'ahci,id=ahci0',
+    '-drive', "if=none,id=qosdata,format=raw,file=$dataCopy",
+    '-device', 'ide-hd,drive=qosdata,bus=ahci0.0',
     '-m', '512M',
     # A modern USB (xHCI) controller plus a USB keyboard/mouse, so the USB stack (WP-04) has real
     # hardware to drive. PS/2 kbd/mouse still work too.

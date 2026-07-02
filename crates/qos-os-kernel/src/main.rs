@@ -144,7 +144,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::serial_println!("[APIC] no RSDP from bootloader; APIC discovery skipped");
     }
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
-    // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
+    ahci::init();         // SATA/AHCI: discover the HBA via PCI BAR5, IDENTIFY the data disk (ADR-0018)
     syscall_ext::init();  // Extended syscalls
     
     // Initialize network
