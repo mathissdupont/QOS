@@ -51,6 +51,7 @@ mod acpi;       // ACPI power management
 mod fat16;      // FAT16 file system
 mod ahci;       // SATA AHCI driver
 mod security;   // CPU security hardening (NX/WP/SMEP/SMAP) — ADR-0020
+mod qjob;       // Background quantum jobs on a preemptive kernel thread — WP-08 s1
 mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod e1000;      // Intel E1000 NIC driver

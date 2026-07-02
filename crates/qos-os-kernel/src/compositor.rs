@@ -478,10 +478,13 @@ fn scancode_to_char(sc: u8, shift: bool) -> Option<char> {
 
 /// Sidebar snippet templates for the Quantum IDE (each opens as an unsaved buffer). The CRZ demo
 /// intentionally contains two mergeable RZ gates so Compile demonstrates the optimizer.
-const QASM_TEMPLATES: [(&str, &str); 3] = [
+const QASM_TEMPLATES: [(&str, &str); 4] = [
     ("Bell", "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];"),
     ("GHZ-3", "OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\nmeasure q[2] -> c[2];"),
     ("CRZ demo", "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\nh q[1];\ncrz(pi/2) q[0],q[1];\nrz(pi/4) q[0];\nrz(pi/4) q[0];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];"),
+    // 16-qubit GHZ benchmark (no measures → sampled): heavy enough on emulated CPUs to make the
+    // preemptive background worker visibly earn its keep (the UI stays live while it runs).
+    ("GHZ-16 bench", "OPENQASM 2.0;\nqreg q[16];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\ncx q[2],q[3];\ncx q[3],q[4];\ncx q[4],q[5];\ncx q[5],q[6];\ncx q[6],q[7];\ncx q[7],q[8];\ncx q[8],q[9];\ncx q[9],q[10];\ncx q[10],q[11];\ncx q[11],q[12];\ncx q[12],q[13];\ncx q[13],q[14];\ncx q[14],q[15];"),
 ];
 
 /// Draw one QASM source line with per-token syntax highlighting (WP-07 slice 4): comments dim,
@@ -1780,18 +1783,47 @@ impl Desktop {
             })
             .collect();
         let n_inst = instrs.len();
-        match crate::quantum::sim::run_program(self.qlab_qubits, self.qlab_qubits, instrs, QLAB_SHOTS) {
-            Some(res) => {
-                let mut pairs: Vec<(String, u64)> =
-                    res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        // Execute on the preemptive background worker (WP-08 s1): the UI stays live meanwhile.
+        let ok = crate::qjob::submit(crate::qjob::Job {
+            origin: crate::qjob::Origin::Lab,
+            n_qubits: self.qlab_qubits,
+            n_cbits: self.qlab_qubits,
+            instrs,
+            shots: QLAB_SHOTS,
+        });
+        self.qlab_status = if ok {
+            format!("{} gates · running on the background worker...", n_inst)
+        } else {
+            "worker busy — a job is already running".to_string()
+        };
+        self.mark_top_window();
+    }
+
+    /// A background quantum job finished — deliver its result to the window that submitted it.
+    fn apply_job_result(&mut self, origin: crate::qjob::Origin, res: Option<crate::quantum::sim::SimResult>) {
+        let Some(res) = res else {
+            match origin {
+                crate::qjob::Origin::Lab => self.qlab_status = "run failed (qubit count out of range)".to_string(),
+                crate::qjob::Origin::Ide => self.qasm_status = "error: qubit count out of range".to_string(),
+            }
+            self.mark_full();
+            return;
+        };
+        let mut pairs: Vec<(String, u64)> = res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        match origin {
+            crate::qjob::Origin::Lab => {
                 pairs.truncate(6);
                 self.qlab_result = pairs;
-                self.qlab_status = format!("{} gates · {} shots", n_inst, QLAB_SHOTS);
+                self.qlab_status = format!("done · {} shots on {} qubits", res.shots, res.n_qubits);
             }
-            None => self.qlab_status = "run failed (qubit count out of range)".to_string(),
+            crate::qjob::Origin::Ide => {
+                pairs.truncate(4);
+                self.qasm_result = pairs;
+                self.qasm_status = format!("done · {} shots on {} qubits (background worker)", res.shots, res.n_qubits);
+            }
         }
-        self.mark_top_window();
+        self.mark_full();
     }
 
     /// The focused window: the topmost one, unless it is minimized (then nothing has focus).
@@ -1921,24 +1953,25 @@ impl Desktop {
         self.mark_top_window();
     }
 
-    /// Run the buffer on the simulator (through the optimizer) and keep the top outcomes.
+    /// Run the buffer: optimize, then submit to the preemptive background worker (WP-08 s1).
     fn qasm_run_buf(&mut self) {
-        use crate::quantum::{parser, sim, transpile};
+        use crate::quantum::{parser, transpile};
         let text = self.qasm_text();
         match parser::parse_qasm2(text.as_bytes()) {
             Ok(prog) => {
                 let (opt, _, _) = transpile::optimize(prog.instructions);
-                match sim::run_program(prog.n_qubits, prog.n_cbits.max(prog.n_qubits), opt, QLAB_SHOTS) {
-                    Some(res) => {
-                        let mut pairs: Vec<(String, u64)> =
-                            res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
-                        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-                        pairs.truncate(4);
-                        self.qasm_result = pairs;
-                        self.qasm_status = format!("ran {} shots on {} qubits", QLAB_SHOTS, res.n_qubits);
-                    }
-                    None => self.qasm_status = "error: qubit count out of range".to_string(),
-                }
+                let ok = crate::qjob::submit(crate::qjob::Job {
+                    origin: crate::qjob::Origin::Ide,
+                    n_qubits: prog.n_qubits,
+                    n_cbits: prog.n_cbits.max(prog.n_qubits),
+                    instrs: opt,
+                    shots: QLAB_SHOTS,
+                });
+                self.qasm_status = if ok {
+                    "running on the background worker... (UI stays live)".to_string()
+                } else {
+                    "worker busy — a job is already running".to_string()
+                };
             }
             Err(e) => self.qasm_status = format!("error — {}", e.message()),
         }
@@ -2834,7 +2867,16 @@ impl Desktop {
                     format!("memory         heap {} KiB / {} MiB", used / 1024, total / 1024 / 1024),
                     format!("usb/xhci       {} kbd, {} mouse — interrupt-driven", kbd, mice),
                     format!("storage/ahci   {}", if crate::ahci::present() { "SATA data disk online" } else { "no disk" }),
-                    format!("quantum/sim    {} job(s) executed since boot", jobs),
+                    format!(
+                        "quantum/sim    {} job(s) since boot · worker {}",
+                        jobs,
+                        match crate::qjob::state() {
+                            crate::qjob::RUNNING => "RUNNING (preempted)",
+                            crate::qjob::QUEUED => "queued",
+                            crate::qjob::DONE => "done",
+                            _ => "idle",
+                        }
+                    ),
                 ];
                 for line in rows.iter() {
                     fr.draw_text(s, bx + 8, y, line, 13.0, theme.text);
@@ -3196,6 +3238,9 @@ pub fn run_demo() {
     let mut shift = false;
     let mut last_refresh = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed) as i64;
     let mut last_minute = crate::rtc::read_datetime().minute;
+    // WP-08 s1: arm the preemptive scheduler with the background quantum-job worker. From here
+    // on the desktop (main context) and the worker share the CPU via the APIC timer.
+    crate::qjob::start();
 
     loop {
         // Pump USB HID here too: `run_demo` runs synchronously (it blocks the scheduler loop that
@@ -3219,6 +3264,7 @@ pub fn run_demo() {
                             desk.files_cancel_name();
                             continue;
                         }
+                        crate::qjob::stop(); // disarm preemption before handing off to the shell
                         crate::framebuffer::clear(0x000000);
                         crate::framebuffer::reset_cursor();
                         return; // Esc → shell (from anywhere)
@@ -3307,6 +3353,11 @@ pub fn run_demo() {
                             0x3F => desk.qasm_run_buf(),      // F5
                             0x3C => desk.qasm_save(),         // F2
                             0x42 => desk.qasm_goto_problem(), // F8 → jump to problem line
+                            0x3D => {
+                                // F3 → open the GHZ-16 benchmark template (preemption showcase).
+                                let (_, src) = QASM_TEMPLATES[QASM_TEMPLATES.len() - 1];
+                                desk.qasm_open(None, src.to_string());
+                            }
                             0x48 => desk.qasm_move(0, -1),    // Up
                             0x50 => desk.qasm_move(0, 1),     // Down
                             0x4B => desk.qasm_move(-1, 0),    // Left
@@ -3455,6 +3506,10 @@ pub fn run_demo() {
                 }
                 _ => {}
             }
+        }
+        // Deliver finished background quantum jobs to their submitting window (WP-08 s1).
+        if let Some((origin, res)) = crate::qjob::take_result() {
+            desk.apply_job_result(origin, res);
         }
         // Live refresh (~1 Hz): repaint a focused live-data window (System Monitor / Processes),
         // and repaint the top bar when the RTC minute rolls over so the menu-bar clock is real.
