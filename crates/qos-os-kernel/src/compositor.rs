@@ -524,6 +524,8 @@ struct Desktop {
     /// Files app: current directory (empty = root) + optional file preview text.
     files_cwd: String,
     files_preview: Option<String>,
+    /// Files: browsing the persistent SATA disk (QOSFS) instead of the RAM fs.
+    files_on_disk: bool,
     /// Files: the currently selected entry name (for Rename/Delete/Edit).
     files_sel: Option<String>,
     /// Files: a status/error line under the toolbar (e.g. "deleted", "cannot delete non-empty dir").
@@ -562,6 +564,7 @@ impl Desktop {
             term: Terminal::new(),
             files_cwd: String::new(),
             files_preview: None,
+            files_on_disk: false,
             files_sel: None,
             files_status: String::new(),
             files_naming: None,
@@ -574,14 +577,29 @@ impl Desktop {
     }
 
     // ---- app actions (invoked by body clicks) ----
-    /// The Files listing for the current directory: `..` (unless at root) then dirs, then files,
-    /// each sorted by name. Used by both drawing and click hit-testing.
+    /// Display name of the persistent-disk location shown at the RAM-fs root.
+    const DISK_ENTRY: &'static str = "Disk (SATA)";
+
+    /// The Files listing for the current location. RAM fs: `..` (unless at root) then dirs, then
+    /// files, each sorted by name — with a "Disk (SATA)" location at the root when a formatted
+    /// persistent disk is present. Disk: `..` (back to the RAM root) + the flat QOSFS listing.
+    /// Used by both drawing and click hit-testing.
     fn files_list(&self) -> Vec<(String, bool, usize)> {
+        let mut list = Vec::new();
+        if self.files_on_disk {
+            list.push(("..".to_string(), true, 0));
+            let mut entries = crate::diskfs::get_entries(b"");
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            list.extend(entries);
+            return list;
+        }
         let mut entries = crate::fs::get_entries(self.files_cwd.as_bytes());
         entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        let mut list = Vec::new();
         if !self.files_cwd.is_empty() {
             list.push(("..".to_string(), true, 0));
+        } else if crate::ahci::present() {
+            // The persistent disk appears as a location at the top of the root listing.
+            list.push((Self::DISK_ENTRY.to_string(), true, 0));
         }
         list.extend(entries);
         list
@@ -654,6 +672,29 @@ impl Desktop {
     /// Navigate the Files app into `name` (a subdir) or up (`..`), or select+preview a file.
     fn files_click(&mut self, name: &str, is_dir: bool) {
         self.files_status.clear();
+        if self.files_on_disk {
+            if name == ".." {
+                // Leave the disk location, back to the RAM-fs root.
+                self.files_on_disk = false;
+                self.files_preview = None;
+                self.files_sel = None;
+            } else {
+                // Select + preview a disk file.
+                self.files_sel = Some(name.to_string());
+                self.files_preview = Some(match crate::diskfs::read(name.as_bytes()) {
+                    Some(bytes) => {
+                        let mut s = String::new();
+                        for &b in bytes.iter().take(400) {
+                            s.push(if b == b'\n' || (0x20..0x7f).contains(&b) { b as char } else { '.' });
+                        }
+                        s
+                    }
+                    None => "(cannot read)".to_string(),
+                });
+            }
+            self.mark_full();
+            return;
+        }
         if name == ".." {
             // Go up one path segment.
             if let Some(pos) = self.files_cwd.rfind('/') {
@@ -663,6 +704,17 @@ impl Desktop {
             }
             self.files_preview = None;
             self.files_sel = None;
+        } else if name == Self::DISK_ENTRY && self.files_cwd.is_empty() {
+            // Enter the persistent-disk location.
+            self.files_on_disk = true;
+            self.files_preview = None;
+            self.files_sel = None;
+            if !crate::diskfs::is_formatted() {
+                self.files_status = "disk unformatted — run dformat in the Terminal".to_string();
+            } else {
+                let mib = crate::ahci::capacity_sectors() * 512 / 1024 / 1024;
+                self.files_status = format!("SATA disk, {} MiB (persistent)", mib);
+            }
         } else if is_dir {
             // Single click selects a dir; navigating in is via double-purpose: select then click
             // again enters. Keep it simple: clicking a dir enters it (mirrors the old behavior).
@@ -690,6 +742,42 @@ impl Desktop {
         self.mark_full();
     }
 
+    /// Keyboard navigation: move the Files selection up/down through the visible rows.
+    fn files_nav(&mut self, down: bool) {
+        let list = self.files_list();
+        let visible = list.len().min(FILES_MAX_ROWS);
+        if visible == 0 {
+            return;
+        }
+        let cur = self
+            .files_sel
+            .as_deref()
+            .and_then(|s| list[..visible].iter().position(|(n, _, _)| n == s));
+        let idx = match cur {
+            Some(i) => {
+                if down {
+                    (i + 1).min(visible - 1)
+                } else {
+                    i.saturating_sub(1)
+                }
+            }
+            None => 0,
+        };
+        self.files_sel = Some(list[idx].0.clone());
+        self.mark_top_window();
+    }
+
+    /// Keyboard activation (Enter): open the selected row — enter a dir / location, or preview a
+    /// file — exactly like a mouse click on it.
+    fn files_activate(&mut self) {
+        let Some(sel) = self.files_sel.clone() else { return };
+        let list = self.files_list();
+        if let Some((name, is_dir, _)) = list.iter().find(|(n, _, _)| *n == sel) {
+            let (n, d) = (name.clone(), *is_dir);
+            self.files_click(&n, d);
+        }
+    }
+
     /// A Files toolbar button was clicked (index into `FILES_TOOLBAR`).
     fn files_tool(&mut self, i: usize) {
         self.files_status.clear();
@@ -697,8 +785,8 @@ impl Desktop {
             0 => self.files_begin_name(NameMode::NewFile), // New File
             1 => self.files_begin_name(NameMode::NewDir),  // New Dir
             2 => {
-                // Rename: needs a selection.
-                if self.files_sel.is_some() {
+                // Rename: needs a real selection (not ".." / the disk location).
+                if self.files_sel_real().is_some() {
                     self.files_begin_name(NameMode::Rename);
                 } else {
                     self.files_status = "select an item first".to_string();
@@ -709,6 +797,13 @@ impl Desktop {
             4 => self.files_edit(),   // Edit (open in Text Editor)
             _ => {}
         }
+    }
+
+    /// The selection, unless it is a pseudo-entry (`..` / the disk location) that ops must skip.
+    fn files_sel_real(&self) -> Option<String> {
+        self.files_sel
+            .clone()
+            .filter(|s| s != ".." && s != Self::DISK_ENTRY)
     }
 
     /// Open the Files naming modal in `mode` (prefilled with the selection for Rename).
@@ -735,6 +830,45 @@ impl Desktop {
         self.files_name_buf.clear();
         if name.is_empty() || name.contains('/') {
             self.files_status = "invalid name".to_string();
+            self.mark_full();
+            return;
+        }
+        if self.files_on_disk {
+            // Persistent-disk (QOSFS, flat) variants of the ops.
+            if !crate::diskfs::is_formatted() {
+                self.files_status = "disk unformatted — run dformat in the Terminal".to_string();
+                self.mark_full();
+                return;
+            }
+            match mode {
+                NameMode::NewFile => match crate::diskfs::write(name.as_bytes(), b"") {
+                    Ok(()) => {
+                        self.files_status = format!("created {} on disk", name);
+                        self.files_sel = Some(name);
+                    }
+                    Err(e) => self.files_status = format!("error: {}", e),
+                },
+                NameMode::NewDir => {
+                    self.files_status = "disk fs is flat (no directories yet)".to_string();
+                }
+                NameMode::Rename => {
+                    // QOSFS has no rename; emulate via read + write + remove.
+                    if let Some(old) = self.files_sel.clone() {
+                        match crate::diskfs::read(old.as_bytes()) {
+                            Some(bytes) => match crate::diskfs::write(name.as_bytes(), &bytes) {
+                                Ok(()) => {
+                                    crate::diskfs::remove(old.as_bytes());
+                                    self.files_status = format!("renamed to {}", name);
+                                    self.files_sel = Some(name);
+                                    self.files_preview = None;
+                                }
+                                Err(e) => self.files_status = format!("error: {}", e),
+                            },
+                            None => self.files_status = "error: cannot read source".to_string(),
+                        }
+                    }
+                }
+            }
             self.mark_full();
             return;
         }
@@ -776,11 +910,22 @@ impl Desktop {
 
     /// Delete the selected entry (files, or empty dirs — the fs enforces non-empty).
     fn files_delete(&mut self) {
-        let Some(name) = self.files_sel.clone() else {
+        let Some(name) = self.files_sel_real() else {
             self.files_status = "select an item first".to_string();
             self.mark_full();
             return;
         };
+        if self.files_on_disk {
+            if crate::diskfs::remove(name.as_bytes()) {
+                self.files_status = format!("deleted {} from disk", name);
+                self.files_sel = None;
+                self.files_preview = None;
+            } else {
+                self.files_status = "cannot delete (disk)".to_string();
+            }
+            self.mark_full();
+            return;
+        }
         let path = self.files_path(&name);
         match crate::fs::remove(path.as_bytes()) {
             Ok(()) => {
@@ -795,11 +940,16 @@ impl Desktop {
 
     /// Open the selected file in the Text Editor.
     fn files_edit(&mut self) {
-        let Some(name) = self.files_sel.clone() else {
+        let Some(name) = self.files_sel_real() else {
             self.files_status = "select a file first".to_string();
             self.mark_full();
             return;
         };
+        if self.files_on_disk {
+            self.editor_open(&format!("disk:{}", name));
+            self.open_app(AppKind::Editor);
+            return;
+        }
         if crate::fs::is_dir(self.files_path(&name).as_bytes()) {
             self.files_status = "cannot edit a directory".to_string();
             self.mark_full();
@@ -810,9 +960,14 @@ impl Desktop {
         self.open_app(AppKind::Editor);
     }
 
-    /// Load `path` into the Text Editor buffer.
+    /// Load `path` into the Text Editor buffer. A `disk:` prefix targets the persistent disk
+    /// (QOSFS); anything else is the RAM fs.
     fn editor_open(&mut self, path: &str) {
-        match crate::fs::read(path.as_bytes()) {
+        let bytes = match path.strip_prefix("disk:") {
+            Some(name) => crate::diskfs::read(name.as_bytes()),
+            None => crate::fs::read(path.as_bytes()),
+        };
+        match bytes {
             Some(bytes) => {
                 self.editor_buf = String::from_utf8_lossy(&bytes).into_owned();
                 self.editor_path = Some(path.to_string());
@@ -826,13 +981,20 @@ impl Desktop {
         }
     }
 
-    /// Save the Text Editor buffer back to its file via the real fs.
+    /// Save the Text Editor buffer back to its file — the persistent disk for `disk:` paths, the
+    /// RAM fs otherwise.
     fn editor_save(&mut self) {
         match self.editor_path.clone() {
-            Some(path) => match crate::fs::write(path.as_bytes(), self.editor_buf.as_bytes()) {
-                Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, self.editor_buf.len()),
-                Err(e) => self.editor_status = format!("save error: {}", e),
-            },
+            Some(path) => {
+                let res = match path.strip_prefix("disk:") {
+                    Some(name) => crate::diskfs::write(name.as_bytes(), self.editor_buf.as_bytes()),
+                    None => crate::fs::write(path.as_bytes(), self.editor_buf.as_bytes()),
+                };
+                match res {
+                    Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, self.editor_buf.len()),
+                    Err(e) => self.editor_status = format!("save error: {}", e),
+                }
+            }
             None => self.editor_status = "no file — create one from Files first".to_string(),
         }
         self.mark_full();
@@ -1054,8 +1216,14 @@ impl Desktop {
                 fr.draw_text(s, tx, ty, &prompt, 14.0, green);
             }
             AppKind::Files => {
-                // Real listing of the current directory (the in-kernel filesystem).
-                let path = if self.files_cwd.is_empty() { "/".to_string() } else { format!("/{}", self.files_cwd) };
+                // Real listing of the current location (RAM fs or the persistent SATA disk).
+                let path = if self.files_on_disk {
+                    "disk:/   (persistent SATA)".to_string()
+                } else if self.files_cwd.is_empty() {
+                    "/".to_string()
+                } else {
+                    format!("/{}", self.files_cwd)
+                };
                 fr.draw_text(s, bx, r.y + HEADER_H + 22, &path, 14.0, theme.text_dim);
                 // Keyboard-shortcut hint (right-aligned) — this is a real keyboard-driven file mgr.
                 let hint = "keys  n·new  k·dir  r·ren  x·del  e·edit";
@@ -1694,6 +1862,9 @@ pub fn run_demo() {
                             0x13 if files_focused => desk.files_tool(2), // r → Rename (selection)
                             0x2D if files_focused => desk.files_tool(3), // x → Delete (selection)
                             0x12 if files_focused => desk.files_tool(4), // e → Edit (selection)
+                            0x48 if files_focused => desk.files_nav(false), // Up → selection up
+                            0x50 if files_focused => desk.files_nav(true),  // Down → selection down
+                            0x1C if files_focused => desk.files_activate(), // Enter → open selection
                             _ => {}
                         }
                     }
