@@ -50,6 +50,7 @@ mod pci;        // PCI bus enumeration
 mod acpi;       // ACPI power management
 mod fat16;      // FAT16 file system
 mod ahci;       // SATA AHCI driver
+mod security;   // CPU security hardening (NX/WP/SMEP/SMAP) — ADR-0020
 mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod e1000;      // Intel E1000 NIC driver
@@ -144,6 +145,7 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::serial_println!("[APIC] no RSDP from bootloader; APIC discovery skipped");
     }
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
+    security::init();     // CPU hardening: NX + WP + SMEP/SMAP where supported (ADR-0020)
     ahci::init();         // SATA/AHCI: discover the HBA via PCI BAR5, IDENTIFY the data disk (ADR-0018)
     syscall_ext::init();  // Extended syscalls
     

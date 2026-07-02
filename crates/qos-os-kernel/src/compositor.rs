@@ -186,9 +186,6 @@ fn files_row_rect(win: Rect, i: usize) -> Rect {
 fn files_name_box(win: Rect) -> Rect {
     Rect::new(win.x + 36, win.y + HEADER_H + 96, win.w - 72, 96)
 }
-fn qlab_btn_rect(win: Rect, i: usize) -> Rect {
-    Rect::new(win.x + 24 + i as i32 * 150, win.y + HEADER_H + 108, 132, 40)
-}
 /// The two Appearance theme cards (0 = Dark, 1 = Light) in the Settings window.
 fn settings_card_rect(win: Rect, i: usize) -> Rect {
     let cw = (win.w - 48 - 16) / 2;
@@ -238,6 +235,81 @@ enum NameMode {
     NewFile,
     NewDir,
     Rename,
+}
+
+/// Quantum Lab circuit-editor gate kinds (palette order).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QG {
+    H,
+    X,
+    Y,
+    Z,
+    S,
+    T,
+    Rx,
+    Ry,
+    Rz,
+    Cx,
+}
+
+const QLAB_PALETTE: [(QG, &str); 10] = [
+    (QG::H, "H"),
+    (QG::X, "X"),
+    (QG::Y, "Y"),
+    (QG::Z, "Z"),
+    (QG::S, "S"),
+    (QG::T, "T"),
+    (QG::Rx, "RX"),
+    (QG::Ry, "RY"),
+    (QG::Rz, "RZ"),
+    (QG::Cx, "CX"),
+];
+
+/// A placed gate: `q` is the (control) wire, `q2` the CX target (== q for single-qubit gates),
+/// `angle` is the R-gate angle in units of π/4 (1..=8).
+#[derive(Clone, Copy)]
+struct QGate {
+    kind: QG,
+    q: usize,
+    q2: usize,
+    col: usize,
+    angle: u8,
+}
+
+const QLAB_COLS: usize = 8;
+const QLAB_MAX_Q: usize = 5;
+const QLAB_SHOTS: u64 = 1000;
+
+// Quantum Lab geometry (shared by draw + hit-test).
+fn qlab_pal_rect(win: Rect, i: usize) -> Rect {
+    Rect::new(win.x + 14 + i as i32 * 37, win.y + HEADER_H + 8, 33, 24)
+}
+/// Control buttons: 0 = Run, 1 = Clear, 2 = Q-, 3 = Q+, 4 = angle cycler.
+fn qlab_ctl_rect(win: Rect, i: usize) -> Rect {
+    let (x, w) = match i {
+        0 => (14, 64),
+        1 => (84, 56),
+        2 => (146, 28),
+        3 => (180, 28),
+        _ => (214, 96),
+    };
+    Rect::new(win.x + x, win.y + HEADER_H + 38, w, 24)
+}
+fn qlab_cell_rect(win: Rect, q: usize, col: usize) -> Rect {
+    Rect::new(win.x + 44 + col as i32 * 44 + 3, win.y + HEADER_H + 72 + q as i32 * 34, 38, 28)
+}
+/// Angle label for `steps` × π/4 (indices 1..=8).
+fn qlab_angle_label(steps: u8) -> &'static str {
+    match steps {
+        1 => "pi/4",
+        2 => "pi/2",
+        3 => "3pi/4",
+        4 => "pi",
+        5 => "5pi/4",
+        6 => "3pi/2",
+        7 => "7pi/4",
+        _ => "2pi",
+    }
 }
 
 /// Calculator button grid (4×4) + a wide Clear; shared by drawing and hit-testing.
@@ -728,8 +800,16 @@ struct Desktop {
     /// Files: active naming modal (kind + typed buffer), if any.
     files_naming: Option<NameMode>,
     files_name_buf: String,
-    /// Quantum Lab: last run's result lines.
-    qlab: Vec<String>,
+    /// Quantum Lab circuit editor: qubit count, placed gates, palette selection, grid cursor,
+    /// pending CX control cell, R-gate angle (×π/4), last run's histogram + a status line.
+    qlab_qubits: usize,
+    qlab_gates: Vec<QGate>,
+    qlab_sel: usize,
+    qlab_cursor: (usize, usize),
+    qlab_pending: Option<(usize, usize)>,
+    qlab_angle: u8,
+    qlab_result: Vec<(String, u64)>,
+    qlab_status: String,
     /// Text Editor: path of the open file (None = nothing open), buffer, and a status line.
     editor_path: Option<String>,
     editor_buf: String,
@@ -768,7 +848,19 @@ impl Desktop {
             files_status: String::new(),
             files_naming: None,
             files_name_buf: String::new(),
-            qlab: Vec::new(),
+            qlab_qubits: 3,
+            // A GHZ circuit is pre-loaded so the first Run immediately shows entanglement.
+            qlab_gates: vec![
+                QGate { kind: QG::H, q: 0, q2: 0, col: 0, angle: 2 },
+                QGate { kind: QG::Cx, q: 0, q2: 1, col: 1, angle: 2 },
+                QGate { kind: QG::Cx, q: 1, q2: 2, col: 2, angle: 2 },
+            ],
+            qlab_sel: 0,
+            qlab_cursor: (0, 0),
+            qlab_pending: None,
+            qlab_angle: 2, // π/2
+            qlab_result: Vec::new(),
+            qlab_status: "Space places · Enter runs · arrows move".to_string(),
             editor_path: None,
             editor_buf: String::new(),
             editor_status: "no file open — open one from Files".to_string(),
@@ -845,10 +937,56 @@ impl Desktop {
                 }
             }
             AppKind::Quantum => {
-                for idx in 0..2 {
-                    if qlab_btn_rect(wr, idx).contains(cx, cy) {
-                        self.qlab_run(idx as u8);
+                // Palette.
+                for i in 0..QLAB_PALETTE.len() {
+                    if qlab_pal_rect(wr, i).contains(cx, cy) {
+                        self.qlab_sel = i;
+                        self.qlab_pending = None;
+                        self.mark_top_window();
                         return;
+                    }
+                }
+                // Controls: Run / Clear / Q- / Q+ / angle.
+                for i in 0..5 {
+                    if qlab_ctl_rect(wr, i).contains(cx, cy) {
+                        match i {
+                            0 => self.qlab_run(),
+                            1 => {
+                                self.qlab_gates.clear();
+                                self.qlab_result.clear();
+                                self.qlab_pending = None;
+                                self.mark_top_window();
+                            }
+                            2 => {
+                                if self.qlab_qubits > 2 {
+                                    self.qlab_qubits -= 1;
+                                    self.qlab_gates.retain(|g| g.q < self.qlab_qubits && g.q2 < self.qlab_qubits);
+                                    self.qlab_cursor.0 = self.qlab_cursor.0.min(self.qlab_qubits - 1);
+                                    self.mark_top_window();
+                                }
+                            }
+                            3 => {
+                                if self.qlab_qubits < QLAB_MAX_Q {
+                                    self.qlab_qubits += 1;
+                                    self.mark_top_window();
+                                }
+                            }
+                            _ => {
+                                self.qlab_angle = if self.qlab_angle >= 8 { 1 } else { self.qlab_angle + 1 };
+                                self.mark_top_window();
+                            }
+                        }
+                        return;
+                    }
+                }
+                // Grid cells.
+                for q in 0..self.qlab_qubits {
+                    for col in 0..QLAB_COLS {
+                        if qlab_cell_rect(wr, q, col).contains(cx, cy) {
+                            self.qlab_cursor = (q, col);
+                            self.qlab_place(q, col);
+                            return;
+                        }
                     }
                 }
             }
@@ -1232,28 +1370,84 @@ impl Desktop {
         self.mark_full();
     }
 
-    /// Run the given quantum program in the Quantum Lab and capture measurement counts.
-    fn qlab_run(&mut self, kind: u8) {
-        self.qlab.clear();
-        match kind {
-            0 => {
-                let (z, o) = crate::quantum::sim::run_bell(1000);
-                self.qlab.push(format!("Bell x1000:  00 -> {}   11 -> {}", z, o));
-            }
-            _ => match crate::quantum::sim::run_qasm2(
-                b"OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nh q[0];\ncx q[0],q[1];\ncx q[1],q[2];\nmeasure q[0]->c[0];\nmeasure q[1]->c[1];\nmeasure q[2]->c[2];\n",
-                1000,
-            ) {
-                Ok(res) => {
-                    self.qlab.push("GHZ x1000:".to_string());
-                    for (k, v) in res.counts.iter() {
-                        self.qlab.push(format!("  {} -> {}", k, v));
+    // ---- Quantum Lab circuit editor ----
+    /// Index of the gate occupying wire `q` at column `col` (as control or CX target), if any.
+    fn qlab_gate_at(&self, q: usize, col: usize) -> Option<usize> {
+        self.qlab_gates
+            .iter()
+            .position(|g| g.col == col && (g.q == q || (g.kind == QG::Cx && g.q2 == q)))
+    }
+
+    /// Place the selected palette gate at (q, col) — or remove the gate already there. CX takes
+    /// two placements: first the control cell, then the target on another wire of the same column.
+    fn qlab_place(&mut self, q: usize, col: usize) {
+        self.qlab_status.clear();
+        // Clicking an occupied cell removes that gate (uniform, predictable editing).
+        if let Some(i) = self.qlab_gate_at(q, col) {
+            self.qlab_gates.remove(i);
+            self.qlab_pending = None;
+            self.mark_top_window();
+            return;
+        }
+        let (kind, _) = QLAB_PALETTE[self.qlab_sel];
+        if kind == QG::Cx {
+            match self.qlab_pending {
+                None => {
+                    self.qlab_pending = Some((q, col));
+                    self.qlab_status = "CX: now pick the target wire (same column)".to_string();
+                }
+                Some((cq, ccol)) => {
+                    if ccol == col && cq != q {
+                        self.qlab_gates.push(QGate { kind: QG::Cx, q: cq, q2: q, col, angle: 2 });
+                        self.qlab_pending = None;
+                    } else {
+                        self.qlab_pending = None;
+                        self.qlab_status = "CX cancelled (target must share the column)".to_string();
                     }
                 }
-                Err(_) => self.qlab.push("parse error".to_string()),
-            },
+            }
+        } else {
+            self.qlab_gates.push(QGate { kind, q, q2: q, col, angle: self.qlab_angle });
         }
-        self.mark_full();
+        self.mark_top_window();
+    }
+
+    /// Run the edited circuit on the real statevector simulator and keep the top outcomes.
+    fn qlab_run(&mut self) {
+        use crate::quantum::parser::Instruction as I;
+        let mut gates = self.qlab_gates.clone();
+        gates.sort_by_key(|g| (g.col, g.q));
+        let instrs: Vec<I> = gates
+            .iter()
+            .map(|g| {
+                let th = g.angle as f64 * core::f64::consts::FRAC_PI_4;
+                match g.kind {
+                    QG::H => I::H(g.q),
+                    QG::X => I::X(g.q),
+                    QG::Y => I::Y(g.q),
+                    QG::Z => I::Z(g.q),
+                    QG::S => I::S(g.q),
+                    QG::T => I::T(g.q),
+                    QG::Rx => I::Rx(g.q, th),
+                    QG::Ry => I::Ry(g.q, th),
+                    QG::Rz => I::Rz(g.q, th),
+                    QG::Cx => I::Cx(g.q, g.q2),
+                }
+            })
+            .collect();
+        let n_inst = instrs.len();
+        match crate::quantum::sim::run_program(self.qlab_qubits, self.qlab_qubits, instrs, QLAB_SHOTS) {
+            Some(res) => {
+                let mut pairs: Vec<(String, u64)> =
+                    res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                pairs.truncate(6);
+                self.qlab_result = pairs;
+                self.qlab_status = format!("{} gates · {} shots", n_inst, QLAB_SHOTS);
+            }
+            None => self.qlab_status = "run failed (qubit count out of range)".to_string(),
+        }
+        self.mark_top_window();
     }
 
     /// The focused window: the topmost one, unless it is minimized (then nothing has focus).
@@ -1610,23 +1804,98 @@ impl Desktop {
                 }
             }
             AppKind::Quantum => {
-                fr.draw_text(s, bx, by, "Circuit:", 14.0, theme.text_dim);
-                for (j, line) in ["q0 |0>  H  *", "q1 |0>     X"].iter().enumerate() {
-                    fr.draw_text(s, bx, by + 26 + j as i32 * 22, line, 15.0, theme.text);
+                // Gate palette (selected gate highlighted).
+                for (i, (_, label)) in QLAB_PALETTE.iter().enumerate() {
+                    let b = qlab_pal_rect(r, i);
+                    let sel = i == self.qlab_sel;
+                    s.rounded_rect(b, 6, if sel { theme.accent } else { theme.surface_alt });
+                    let lw = fr.text_width(label, 12.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 17, label, 12.0, if sel { theme.on_accent } else { theme.text });
                 }
-                for (idx, label) in [(0usize, "Run Bell"), (1usize, "Run GHZ")] {
-                    let b = qlab_btn_rect(r, idx);
-                    s.rounded_rect(b, 9, theme.accent);
-                    let lw = fr.text_width(label, 15.0);
-                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 26, label, 15.0, theme.on_accent);
+                // Controls.
+                let angle_lbl = format!("A = {}", qlab_angle_label(self.qlab_angle));
+                let ctls: [(usize, &str, bool); 5] = [
+                    (0, "Run", true),
+                    (1, "Clear", false),
+                    (2, "-", false),
+                    (3, "+", false),
+                    (4, angle_lbl.as_str(), false),
+                ];
+                for (i, label, accent) in ctls {
+                    let b = qlab_ctl_rect(r, i);
+                    s.rounded_rect(b, 6, if accent { theme.accent } else { theme.surface_alt });
+                    let lw = fr.text_width(label, 12.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 17, label, 12.0, if accent { theme.on_accent } else { theme.text });
                 }
-                let mut ry = qlab_btn_rect(r, 0).bottom() + 26;
-                if self.qlab.is_empty() {
-                    fr.draw_text(s, bx, ry, "click Run to simulate + measure", 13.0, theme.text_dim);
+                // Circuit grid: one wire per qubit, gates drawn on top.
+                let wire_col = theme.text_dim;
+                for q in 0..self.qlab_qubits {
+                    let cell0 = qlab_cell_rect(r, q, 0);
+                    let wy = cell0.y + cell0.h / 2;
+                    fr.draw_text(s, r.x + 14, wy + 5, &format!("q{}", q), 13.0, theme.text_dim);
+                    let x0 = qlab_cell_rect(r, q, 0).x - 3;
+                    let x1 = qlab_cell_rect(r, q, QLAB_COLS - 1).right() + 3;
+                    s.fill_rect(Rect::new(x0, wy, x1 - x0, 2), wire_col);
                 }
-                for line in self.qlab.iter().take(7) {
-                    fr.draw_text(s, bx, ry, line, 14.0, theme.text);
-                    ry += 20;
+                // Cursor ring on the active cell.
+                let (cq, ccol) = self.qlab_cursor;
+                if cq < self.qlab_qubits {
+                    let cell = qlab_cell_rect(r, cq, ccol);
+                    s.rounded_rect(cell.inflate(3), 8, theme.accent);
+                    s.rounded_rect(cell.inflate(1), 6, theme.surface);
+                    // Redraw the wire segment through the cursor cell.
+                    let wy = cell.y + cell.h / 2;
+                    s.fill_rect(Rect::new(cell.x, wy, cell.w, 2), wire_col);
+                }
+                // Pending CX control marker.
+                if let Some((pq, pcol)) = self.qlab_pending {
+                    if pq < self.qlab_qubits {
+                        let cell = qlab_cell_rect(r, pq, pcol);
+                        circle(s, cell.x + cell.w / 2, cell.y + cell.h / 2, 12, theme.accent);
+                    }
+                }
+                // Placed gates.
+                for g in self.qlab_gates.iter() {
+                    if g.q >= self.qlab_qubits || g.q2 >= self.qlab_qubits {
+                        continue;
+                    }
+                    let cell = qlab_cell_rect(r, g.q, g.col);
+                    let (ccx, ccy) = (cell.x + cell.w / 2, cell.y + cell.h / 2);
+                    if g.kind == QG::Cx {
+                        let tcell = qlab_cell_rect(r, g.q2, g.col);
+                        let (tx, ty) = (tcell.x + tcell.w / 2, tcell.y + tcell.h / 2);
+                        // Vertical connector, control dot, target ⊕.
+                        let (top, bot) = if ccy < ty { (ccy, ty) } else { (ty, ccy) };
+                        s.fill_rect(Rect::new(ccx - 1, top, 2, bot - top), theme.accent);
+                        circle(s, ccx, ccy, 10, theme.accent);
+                        circle(s, tx, ty, 16, theme.accent);
+                        circle(s, tx, ty, 10, theme.surface);
+                        s.fill_rect(Rect::new(tx - 7, ty - 1, 14, 2), theme.accent);
+                        s.fill_rect(Rect::new(tx - 1, ty - 7, 2, 14), theme.accent);
+                    } else {
+                        let tint = qos_ui::rgb(0x8a, 0x5c, 0xd8);
+                        s.rounded_rect(cell, 6, tint);
+                        let is_r = matches!(g.kind, QG::Rx | QG::Ry | QG::Rz);
+                        let label = QLAB_PALETTE.iter().find(|(k, _)| *k == g.kind).map(|(_, l)| *l).unwrap_or("?");
+                        let size = if is_r { 11.0 } else { 14.0 };
+                        let lw = fr.text_width(label, size);
+                        fr.draw_text(s, ccx - lw / 2, ccy + 5, label, size, qos_ui::rgb(0xff, 0xff, 0xff));
+                    }
+                }
+                // Status + histogram of the last run.
+                let hist_y = qlab_cell_rect(r, self.qlab_qubits - 1, 0).bottom() + 14;
+                fr.draw_text(s, r.x + 14, hist_y, &self.qlab_status, 12.0, theme.text_dim);
+                let mut hy = hist_y + 12;
+                let bar_max = r.w - 160;
+                for (bits, count) in self.qlab_result.iter() {
+                    fr.draw_text(s, r.x + 14, hy + 13, bits, 13.0, theme.text);
+                    let bw = ((*count as i64 * bar_max as i64) / QLAB_SHOTS as i64) as i32;
+                    s.rounded_rect(Rect::new(r.x + 76, hy + 2, bw.max(3), 14), 4, theme.accent);
+                    fr.draw_text(s, r.x + 82 + bw.max(3), hy + 13, &format!("{}", count), 12.0, theme.text_dim);
+                    hy += 20;
+                }
+                if self.qlab_result.is_empty() {
+                    fr.draw_text(s, r.x + 14, hy + 14, "press Run to execute on the statevector simulator", 12.0, theme.text_dim);
                 }
             }
             AppKind::Monitor => {
@@ -1715,10 +1984,11 @@ impl Desktop {
                 } else {
                     "no disk attached".to_string()
                 };
-                let rows: [(&str, String); 4] = [
+                let rows: [(&str, String); 5] = [
                     ("Display", format!("{} x {}  ·  32-bit true color  ·  UEFI framebuffer", self.w, self.h)),
                     ("Input", format!("{} USB keyboard(s), {} USB mouse/mice  ·  MSI-X", kbd, mice)),
                     ("Storage", disk),
+                    ("Security", crate::security::status_line()),
                     ("About", format!("QOS 0.1 — Heptapus Group  ·  heap {}/{} MiB  ·  up {} s", used / 1024 / 1024, total / 1024 / 1024, ticks / 100)),
                 ];
                 for (label, value) in rows.iter() {
@@ -2258,6 +2528,68 @@ pub fn run_demo() {
                                 if let Some(c) = scancode_to_char(scancode, shift) {
                                     if desk.editor_buf.len() < 32 * 1024 {
                                         desk.editor_buf.push(c);
+                                        desk.mark_top_window();
+                                    }
+                                }
+                            }
+                        }
+                    } else if desk.focused().map_or(false, |w| w.kind == AppKind::Quantum) {
+                        // Focused Quantum Lab: full keyboard circuit editing.
+                        match scancode {
+                            0x11 => {
+                                desk.wins.pop();
+                                desk.mark_full();
+                            } // w → close
+                            0x48 => {
+                                desk.qlab_cursor.0 = desk.qlab_cursor.0.saturating_sub(1);
+                                desk.mark_top_window();
+                            } // Up
+                            0x50 => {
+                                desk.qlab_cursor.0 = (desk.qlab_cursor.0 + 1).min(desk.qlab_qubits - 1);
+                                desk.mark_top_window();
+                            } // Down
+                            0x4B => {
+                                desk.qlab_cursor.1 = desk.qlab_cursor.1.saturating_sub(1);
+                                desk.mark_top_window();
+                            } // Left
+                            0x4D => {
+                                desk.qlab_cursor.1 = (desk.qlab_cursor.1 + 1).min(QLAB_COLS - 1);
+                                desk.mark_top_window();
+                            } // Right
+                            0x39 => {
+                                let (q, col) = desk.qlab_cursor;
+                                desk.qlab_place(q, col);
+                            } // Space → place/remove
+                            0x1C => desk.qlab_run(), // Enter → run
+                            0x0E => {
+                                desk.qlab_gates.clear();
+                                desk.qlab_result.clear();
+                                desk.qlab_pending = None;
+                                desk.mark_top_window();
+                            } // Backspace → clear circuit
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    let sel = match c {
+                                        'h' => Some(0),
+                                        'x' => Some(1),
+                                        'y' => Some(2),
+                                        'z' => Some(3),
+                                        's' => Some(4),
+                                        't' => Some(5),
+                                        'r' => Some(match desk.qlab_sel {
+                                            6 => 7,
+                                            7 => 8,
+                                            _ => 6,
+                                        }), // r cycles RX→RY→RZ
+                                        'c' => Some(9),
+                                        _ => None,
+                                    };
+                                    if let Some(i) = sel {
+                                        desk.qlab_sel = i;
+                                        desk.qlab_pending = None;
+                                        desk.mark_top_window();
+                                    } else if c == 'a' {
+                                        desk.qlab_angle = if desk.qlab_angle >= 8 { 1 } else { desk.qlab_angle + 1 };
                                         desk.mark_top_window();
                                     }
                                 }

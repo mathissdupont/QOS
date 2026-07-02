@@ -1,13 +1,15 @@
 //! OpenQASM 2.0 Parser for QOS
 //!
-//! Parses a subset of OpenQASM 2.0 sufficient for basic quantum circuits.
-//! Supported gates: h, x, y, z, s, t, cx, cz, swap, measure
+//! Parses a subset of OpenQASM 2.0 sufficient for real quantum circuits.
+//! Supported gates: h, x, y, z, s, t, cx, cz, swap, measure, reset, and the **parametric**
+//! rotations rx(θ), ry(θ), rz(θ), p(θ) with angle expressions like `pi/2`, `-pi/4`, `3*pi/2`,
+//! or plain decimals.
 
 use alloc::string::String;
 use alloc::vec::Vec;
 
 /// A parsed quantum instruction
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Instruction {
     /// Hadamard gate on qubit
     H(usize),
@@ -21,6 +23,14 @@ pub enum Instruction {
     S(usize),
     /// T gate on qubit
     T(usize),
+    /// RX(θ): parametric rotation about X
+    Rx(usize, f64),
+    /// RY(θ): parametric rotation about Y
+    Ry(usize, f64),
+    /// RZ(θ): parametric rotation about Z
+    Rz(usize, f64),
+    /// P(θ): parametric phase gate diag(1, e^{iθ})
+    P(usize, f64),
     /// CNOT: control, target
     Cx(usize, usize),
     /// CZ gate: control, target
@@ -138,6 +148,26 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Read an unsigned decimal number (integer or fraction) as f64.
+    fn read_float(&mut self) -> Option<f64> {
+        self.skip_whitespace_and_comments();
+        let start = self.pos;
+        while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+            self.pos += 1;
+        }
+        if self.pos < self.input.len() && self.input[self.pos] == b'.' {
+            self.pos += 1;
+            while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
+                self.pos += 1;
+            }
+        }
+        if self.pos > start {
+            core::str::from_utf8(&self.input[start..self.pos]).ok()?.parse().ok()
+        } else {
+            None
+        }
+    }
+
     fn skip_until_semicolon(&mut self) {
         while self.pos < self.input.len() && self.input[self.pos] != b';' {
             self.pos += 1;
@@ -151,6 +181,58 @@ impl<'a> Lexer<'a> {
         self.skip_whitespace_and_comments();
         self.pos >= self.input.len()
     }
+}
+
+/// One factor of an angle expression: `pi` or a decimal literal.
+fn parse_angle_factor(lexer: &mut Lexer) -> Result<f64, ParseError> {
+    lexer.skip_whitespace_and_comments();
+    match lexer.peek() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            let ident = lexer.read_identifier().ok_or_else(|| {
+                ParseError::InvalidSyntax(String::from("expected angle"))
+            })?;
+            if ident == "pi" {
+                Ok(core::f64::consts::PI)
+            } else {
+                Err(ParseError::InvalidSyntax(ident))
+            }
+        }
+        _ => lexer
+            .read_float()
+            .ok_or_else(|| ParseError::InvalidSyntax(String::from("expected angle"))),
+    }
+}
+
+/// Parse an angle expression: `[-] factor (('*' | '/') factor)*` — covers the common QASM forms
+/// `pi/2`, `-pi/4`, `3*pi/2`, `0.785`, `2*pi`.
+fn parse_angle(lexer: &mut Lexer) -> Result<f64, ParseError> {
+    lexer.skip_whitespace_and_comments();
+    let neg = if lexer.peek() == Some(b'-') {
+        lexer.advance();
+        true
+    } else {
+        false
+    };
+    let mut value = parse_angle_factor(lexer)?;
+    loop {
+        lexer.skip_whitespace_and_comments();
+        match lexer.peek() {
+            Some(b'*') => {
+                lexer.advance();
+                value *= parse_angle_factor(lexer)?;
+            }
+            Some(b'/') => {
+                lexer.advance();
+                let d = parse_angle_factor(lexer)?;
+                if d == 0.0 {
+                    return Err(ParseError::InvalidSyntax(String::from("division by zero")));
+                }
+                value /= d;
+            }
+            _ => break,
+        }
+    }
+    Ok(if neg { -value } else { value })
 }
 
 /// Parse a qubit reference like "q[0]" or just "q" (for single-qubit regs)
@@ -314,6 +396,24 @@ pub fn parse_qasm2(input: &[u8]) -> Result<QasmProgram, ParseError> {
             "t" => {
                 let q = parse_qubit_ref(&mut lexer, &qreg_name, n_qubits)?;
                 instructions.push(Instruction::T(q));
+                lexer.expect(b';');
+            }
+            "rx" | "ry" | "rz" | "p" | "u1" => {
+                // Parametric gate: rx(pi/2) q[0];
+                if !lexer.expect(b'(') {
+                    return Err(ParseError::InvalidSyntax(String::from("expected '(' after parametric gate")));
+                }
+                let theta = parse_angle(&mut lexer)?;
+                if !lexer.expect(b')') {
+                    return Err(ParseError::InvalidSyntax(String::from("expected ')'")));
+                }
+                let q = parse_qubit_ref(&mut lexer, &qreg_name, n_qubits)?;
+                instructions.push(match token.as_str() {
+                    "rx" => Instruction::Rx(q, theta),
+                    "ry" => Instruction::Ry(q, theta),
+                    "rz" => Instruction::Rz(q, theta),
+                    _ => Instruction::P(q, theta), // p / u1
+                });
                 lexer.expect(b';');
             }
             "cx" | "CX" | "cnot" | "CNOT" => {

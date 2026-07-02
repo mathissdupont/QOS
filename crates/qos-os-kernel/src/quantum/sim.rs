@@ -8,11 +8,12 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use super::linalg::{
-    expand_single_gate, expand_two_qubit_gate, gate_cx, gate_cz, gate_h, gate_s, gate_swap,
-    gate_t, gate_x, gate_y, gate_z, Complex, Matrix,
-};
+use super::linalg::Complex;
 use super::parser::{Instruction, QasmProgram};
+
+/// Hard cap on simulated qubits: 2^20 amplitudes × 16 B = 16 MiB — fits the kernel heap with
+/// headroom. Also input validation: a hostile/typo'd `qreg q[64]` must fail cleanly, not OOM.
+pub const MAX_QUBITS: usize = 20;
 
 /// Simple PRNG (xorshift64) for measurement sampling
 static RNG_STATE: AtomicU64 = AtomicU64::new(0x853c49e6748fea9b);
@@ -115,61 +116,128 @@ impl Simulator {
         }
     }
 
-    /// Apply a single-qubit gate
-    fn apply_single_gate(&mut self, gate: &Matrix, target: usize) {
-        let full_gate = expand_single_gate(gate, target, self.n_qubits);
-        self.state = full_gate.mul_vec(&self.state);
+    /// Bit mask selecting `qubit` in a basis-state index (qubit 0 = most significant, matching
+    /// `measure_qubit`'s convention).
+    #[inline]
+    fn qbit(&self, qubit: usize) -> usize {
+        1usize << (self.n_qubits - 1 - qubit)
     }
 
-    /// Apply a two-qubit gate
-    fn apply_two_qubit_gate(&mut self, gate: &Matrix, ctrl: usize, targ: usize) {
-        let full_gate = expand_two_qubit_gate(gate, ctrl, targ, self.n_qubits);
-        self.state = full_gate.mul_vec(&self.state);
+    /// Apply a 2×2 unitary to `target` **in place**: O(2^n) time, O(1) extra memory. (The old
+    /// path built the full 2^n×2^n operator — O(4^n) — which made >10 qubits infeasible.)
+    fn apply_single_inplace(&mut self, m: [[Complex; 2]; 2], target: usize) {
+        let bit = self.qbit(target);
+        let dim = self.state.len();
+        for i in 0..dim {
+            if i & bit == 0 {
+                let a = self.state[i];
+                let b = self.state[i | bit];
+                self.state[i] = m[0][0] * a + m[0][1] * b;
+                self.state[i | bit] = m[1][0] * a + m[1][1] * b;
+            }
+        }
+    }
+
+    /// Apply a controlled 2×2 unitary (target rotated only where `ctrl` is |1⟩), in place.
+    fn apply_controlled_inplace(&mut self, m: [[Complex; 2]; 2], ctrl: usize, targ: usize) {
+        let cbit = self.qbit(ctrl);
+        let tbit = self.qbit(targ);
+        let dim = self.state.len();
+        for i in 0..dim {
+            if i & cbit != 0 && i & tbit == 0 {
+                let a = self.state[i];
+                let b = self.state[i | tbit];
+                self.state[i] = m[0][0] * a + m[0][1] * b;
+                self.state[i | tbit] = m[1][0] * a + m[1][1] * b;
+            }
+        }
     }
 
     /// Apply Hadamard gate
     pub fn apply_h(&mut self, target: usize) {
-        self.apply_single_gate(&gate_h(), target);
+        let s = Complex::inv_sqrt2();
+        let h = Complex::new(s, 0.0);
+        self.apply_single_inplace([[h, h], [h, Complex::new(-s, 0.0)]], target);
     }
 
     /// Apply Pauli-X gate
     pub fn apply_x(&mut self, target: usize) {
-        self.apply_single_gate(&gate_x(), target);
+        self.apply_single_inplace([[Complex::ZERO, Complex::ONE], [Complex::ONE, Complex::ZERO]], target);
     }
 
     /// Apply Pauli-Y gate
     pub fn apply_y(&mut self, target: usize) {
-        self.apply_single_gate(&gate_y(), target);
+        let ni = Complex::new(0.0, -1.0);
+        self.apply_single_inplace([[Complex::ZERO, ni], [Complex::I, Complex::ZERO]], target);
     }
 
     /// Apply Pauli-Z gate
     pub fn apply_z(&mut self, target: usize) {
-        self.apply_single_gate(&gate_z(), target);
+        let nz = Complex::new(-1.0, 0.0);
+        self.apply_single_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, nz]], target);
     }
 
     /// Apply S gate
     pub fn apply_s(&mut self, target: usize) {
-        self.apply_single_gate(&gate_s(), target);
+        self.apply_single_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, Complex::I]], target);
     }
 
     /// Apply T gate
     pub fn apply_t(&mut self, target: usize) {
-        self.apply_single_gate(&gate_t(), target);
+        let s = Complex::inv_sqrt2();
+        let t = Complex::new(s, s); // e^{iπ/4}
+        self.apply_single_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, t]], target);
+    }
+
+    /// Apply RX(θ) — rotation about the X axis (parametric).
+    pub fn apply_rx(&mut self, target: usize, theta: f64) {
+        let c = Complex::new(libm::cos(theta / 2.0), 0.0);
+        let ns = Complex::new(0.0, -libm::sin(theta / 2.0));
+        self.apply_single_inplace([[c, ns], [ns, c]], target);
+    }
+
+    /// Apply RY(θ) — rotation about the Y axis (parametric).
+    pub fn apply_ry(&mut self, target: usize, theta: f64) {
+        let c = Complex::new(libm::cos(theta / 2.0), 0.0);
+        let s = libm::sin(theta / 2.0);
+        self.apply_single_inplace([[c, Complex::new(-s, 0.0)], [Complex::new(s, 0.0), c]], target);
+    }
+
+    /// Apply RZ(θ) — rotation about the Z axis (parametric).
+    pub fn apply_rz(&mut self, target: usize, theta: f64) {
+        let e0 = Complex::new(libm::cos(theta / 2.0), -libm::sin(theta / 2.0));
+        let e1 = Complex::new(libm::cos(theta / 2.0), libm::sin(theta / 2.0));
+        self.apply_single_inplace([[e0, Complex::ZERO], [Complex::ZERO, e1]], target);
+    }
+
+    /// Apply P(θ) — phase gate diag(1, e^{iθ}) (parametric).
+    pub fn apply_p(&mut self, target: usize, theta: f64) {
+        let e = Complex::new(libm::cos(theta), libm::sin(theta));
+        self.apply_single_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, e]], target);
     }
 
     /// Apply CNOT (CX) gate
     pub fn apply_cx(&mut self, ctrl: usize, targ: usize) {
-        self.apply_two_qubit_gate(&gate_cx(), ctrl, targ);
+        self.apply_controlled_inplace([[Complex::ZERO, Complex::ONE], [Complex::ONE, Complex::ZERO]], ctrl, targ);
     }
 
     /// Apply CZ gate
     pub fn apply_cz(&mut self, ctrl: usize, targ: usize) {
-        self.apply_two_qubit_gate(&gate_cz(), ctrl, targ);
+        let nz = Complex::new(-1.0, 0.0);
+        self.apply_controlled_inplace([[Complex::ONE, Complex::ZERO], [Complex::ZERO, nz]], ctrl, targ);
     }
 
-    /// Apply SWAP gate
+    /// Apply SWAP gate: exchange amplitudes of basis states that differ in exactly the two bits.
     pub fn apply_swap(&mut self, q1: usize, q2: usize) {
-        self.apply_two_qubit_gate(&gate_swap(), q1, q2);
+        let b1 = self.qbit(q1);
+        let b2 = self.qbit(q2);
+        let dim = self.state.len();
+        for i in 0..dim {
+            if i & b1 != 0 && i & b2 == 0 {
+                let j = (i & !b1) | b2;
+                self.state.swap(i, j);
+            }
+        }
     }
 
     /// Measure a single qubit, collapsing the state
@@ -266,6 +334,10 @@ impl Simulator {
                 }
             }
             Instruction::Reset(q) => self.reset_qubit(*q),
+            Instruction::Rx(q, theta) => self.apply_rx(*q, *theta),
+            Instruction::Ry(q, theta) => self.apply_ry(*q, *theta),
+            Instruction::Rz(q, theta) => self.apply_rz(*q, *theta),
+            Instruction::P(q, theta) => self.apply_p(*q, *theta),
             Instruction::Barrier(_) => {
                 // Barrier is a no-op in simulation
             }
@@ -286,23 +358,23 @@ impl Simulator {
         // Check if program has measurements
         let has_measurements = program.instructions.iter().any(|i| matches!(i, Instruction::Measure(_, _)));
 
-        for _ in 0..shots {
-            self.reset();
-
-            if has_measurements {
-                // Execute with measurements
+        if has_measurements {
+            // Measurements collapse the state, so each shot needs a full re-execution.
+            for _ in 0..shots {
+                self.reset();
                 self.execute_program(program);
-                
-                // Build result from classical register
                 let mut result = String::new();
                 for &c in &self.classical[..program.n_cbits.min(self.classical.len())] {
                     result.push(if c == 1 { '1' } else { '0' });
                 }
-                
                 *counts.entry(result).or_insert(0) += 1;
-            } else {
-                // Execute without measurements, then sample
-                self.execute_program(program);
+            }
+        } else {
+            // No mid-circuit measurement: evolve the state ONCE and draw all shots from the final
+            // distribution — turns 1000 shots from 1000 executions into 1 (major speedup).
+            self.reset();
+            self.execute_program(program);
+            for _ in 0..shots {
                 let outcome = self.sample_outcome();
                 *counts.entry(outcome).or_insert(0) += 1;
             }
@@ -319,12 +391,28 @@ impl Simulator {
 /// Total simulator jobs executed since boot (surfaced by the Process viewer / System Monitor).
 pub static SIM_JOBS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// High-level function: parse and run QASM2
+/// High-level function: parse and run QASM2. Rejects programs beyond [`MAX_QUBITS`] up front so a
+/// hostile or mistyped register size fails with an error instead of exhausting the kernel heap.
 pub fn run_qasm2(qasm: &[u8], shots: u64) -> Result<SimResult, super::parser::ParseError> {
     let program = super::parser::parse_qasm2(qasm)?;
+    if program.n_qubits == 0 || program.n_qubits > MAX_QUBITS {
+        return Err(super::parser::ParseError::QubitOutOfRange(program.n_qubits, MAX_QUBITS));
+    }
     let mut sim = Simulator::new(program.n_qubits);
     SIM_JOBS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     Ok(sim.run(&program, shots))
+}
+
+/// Run a pre-built instruction list (the Quantum Lab circuit editor path — no QASM round-trip).
+/// Measures nothing itself: pass explicit `Measure` instructions or rely on final-state sampling.
+pub fn run_program(n_qubits: usize, n_cbits: usize, instructions: Vec<Instruction>, shots: u64) -> Option<SimResult> {
+    if n_qubits == 0 || n_qubits > MAX_QUBITS {
+        return None;
+    }
+    let program = QasmProgram { n_qubits, n_cbits, instructions };
+    let mut sim = Simulator::new(n_qubits);
+    SIM_JOBS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    Some(sim.run(&program, shots))
 }
 
 /// Quick Bell state simulation (for compatibility with existing API)
