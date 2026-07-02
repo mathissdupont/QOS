@@ -36,6 +36,7 @@ enum AppKind {
     Files,
     Editor,
     Quantum,
+    Qasm,
     Monitor,
     Settings,
     Calculator,
@@ -43,11 +44,12 @@ enum AppKind {
     Processes,
 }
 
-const APPS: [AppKind; 9] = [
+const APPS: [AppKind; 10] = [
     AppKind::Terminal,
     AppKind::Files,
     AppKind::Editor,
     AppKind::Quantum,
+    AppKind::Qasm,
     AppKind::Monitor,
     AppKind::Settings,
     AppKind::Calculator,
@@ -61,6 +63,7 @@ fn app_title(k: AppKind) -> &'static str {
         AppKind::Files => "Files",
         AppKind::Editor => "Text Editor",
         AppKind::Quantum => "Quantum Lab",
+        AppKind::Qasm => "QASM Studio",
         AppKind::Monitor => "System Monitor",
         AppKind::Settings => "Settings",
         AppKind::Calculator => "Calculator",
@@ -75,6 +78,7 @@ fn app_tint(k: AppKind, theme: &Theme) -> qos_ui::Rgb {
         AppKind::Files => qos_ui::rgb(0x30, 0xb0, 0x60),
         AppKind::Editor => qos_ui::rgb(0xd0, 0x9a, 0x2a),
         AppKind::Quantum => qos_ui::rgb(0x8a, 0x5c, 0xd8),
+        AppKind::Qasm => qos_ui::rgb(0x20, 0xa0, 0x8a),
         AppKind::Monitor => qos_ui::rgb(0x27, 0xa8, 0xc8),
         AppKind::Settings => qos_ui::rgb(0xe0, 0x7a, 0x2a),
         AppKind::Calculator => qos_ui::rgb(0x50, 0x60, 0xd8),
@@ -165,6 +169,18 @@ fn draw_app_icon(s: &mut Surface, kind: AppKind, r: Rect, tint: qos_ui::Rgb) {
                 s.rounded_rect(Rect::new(r.x + 5 * u, ly + u / 4, 5 * u, u / 2), u / 4, faint);
             }
         }
+        AppKind::Qasm => {
+            // Code block: dark editor pane + colored code lines (a quantum program).
+            s.rounded_rect(Rect::new(r.x + 2 * u, r.y + 2 * u, 8 * u, 8 * u), u, qos_ui::rgb(0x10, 0x12, 0x18));
+            let colors = [white, qos_ui::rgb(0x8a, 0x5c, 0xd8), faint, qos_ui::rgb(0x6e, 0xe0, 0x7a)];
+            let widths = [5, 4, 6, 3];
+            for i in 0..4 {
+                s.fill_rect(
+                    Rect::new(r.x + 3 * u, r.y + 3 * u + i as i32 * u + i as i32 * u / 2, widths[i] * u, u / 2),
+                    colors[i],
+                );
+            }
+        }
     }
 }
 
@@ -193,6 +209,10 @@ fn settings_card_rect(win: Rect, i: usize) -> Rect {
 }
 /// Text Editor action buttons (Save / New).
 fn editor_btn_rect(win: Rect, i: usize) -> Rect {
+    Rect::new(win.x + 16 + i as i32 * 96, win.y + HEADER_H + 10, 88, 26)
+}
+/// QASM Studio action buttons (0 = Compile, 1 = Run, 2 = Save).
+fn qasm_btn_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 16 + i as i32 * 96, win.y + HEADER_H + 10, 88, 26)
 }
 const FILES_MAX_ROWS: usize = 5;
@@ -284,14 +304,15 @@ const QLAB_SHOTS: u64 = 1000;
 fn qlab_pal_rect(win: Rect, i: usize) -> Rect {
     Rect::new(win.x + 14 + i as i32 * 37, win.y + HEADER_H + 8, 33, 24)
 }
-/// Control buttons: 0 = Run, 1 = Clear, 2 = Q-, 3 = Q+, 4 = angle cycler.
+/// Control buttons: 0 = Run, 1 = Clear, 2 = Q-, 3 = Q+, 4 = angle cycler, 5 = export to QASM.
 fn qlab_ctl_rect(win: Rect, i: usize) -> Rect {
     let (x, w) = match i {
         0 => (14, 64),
         1 => (84, 56),
         2 => (146, 28),
         3 => (180, 28),
-        _ => (214, 96),
+        4 => (214, 96),
+        _ => (316, 62),
     };
     Rect::new(win.x + x, win.y + HEADER_H + 38, w, 24)
 }
@@ -547,6 +568,7 @@ impl Terminal {
                     "  dls / dcat <n>  list / print a disk file",
                     "  dsave <f>       copy a fs file onto the disk (persists)",
                     "  dload <n>       copy a disk file into the fs",
+                    "  qasm <f> [n]    compile + run a .qasm file (n shots)",
                     "  bell            2-qubit Bell state, 1000 shots",
                     "  ghz             3-qubit GHZ state, 1000 shots",
                     "  qrng [n]        n quantum random bits (default 8)",
@@ -712,6 +734,52 @@ impl Terminal {
                 let ticks = crate::interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
                 self.push(format!("heap {} MiB   uptime {} ticks (~{} s)", crate::allocator::HEAP_SIZE / 1024 / 1024, ticks, ticks / 100));
             }
+            "qasm" => {
+                // qasm <file> [shots] — compile (with transpile stats) + run a QASM source file.
+                let (fname, shots_s) = match rest.split_once(' ') {
+                    Some((a, b)) => (a.trim(), b.trim()),
+                    None => (rest, ""),
+                };
+                if fname.is_empty() {
+                    self.push("usage: qasm <file> [shots]".to_string());
+                } else {
+                    let shots = shots_s.parse::<u64>().unwrap_or(1000).clamp(1, 100_000);
+                    let path = self.resolve(fname);
+                    match crate::fs::read(path.as_bytes()) {
+                        None => self.push(format!("qasm: cannot read /{}", path)),
+                        Some(bytes) => match crate::quantum::parser::parse_qasm2(&bytes) {
+                            Err(e) => self.push(format!("qasm: parse error: {:?}", e)),
+                            Ok(prog) => {
+                                let before = prog.instructions.len();
+                                let (opt, removed) =
+                                    crate::quantum::transpile::cancel_pairs(prog.instructions);
+                                let d = crate::quantum::transpile::depth(&opt, prog.n_qubits);
+                                self.push(format!(
+                                    "compiled: {} qubits, {} -> {} gates ({} cancelled), depth {}",
+                                    prog.n_qubits, before, opt.len(), removed, d
+                                ));
+                                match crate::quantum::sim::run_program(
+                                    prog.n_qubits,
+                                    prog.n_cbits.max(prog.n_qubits),
+                                    opt,
+                                    shots,
+                                ) {
+                                    None => self.push("qasm: qubit count out of range".to_string()),
+                                    Some(res) => {
+                                        let mut pairs: Vec<(String, u64)> =
+                                            res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                                        pairs.sort_by(|a, b| b.1.cmp(&a.1));
+                                        self.push(format!("{} shots:", shots));
+                                        for (k, v) in pairs.iter().take(8) {
+                                            self.push(format!("  {} -> {}", k, v));
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                }
+            }
             "bell" => {
                 let (z, o) = crate::quantum::sim::run_bell(1000);
                 self.push(format!("Bell |Φ+> x1000:   00 -> {}    11 -> {}", z, o));
@@ -818,6 +886,11 @@ struct Desktop {
     calc: Calc,
     /// Files: scroll offset into the listing (rows above it are hidden).
     files_scroll: usize,
+    /// QASM Studio: source buffer, optional backing file, compiler/runner status, last histogram.
+    qasm_buf: String,
+    qasm_path: Option<String>,
+    qasm_status: String,
+    qasm_result: Vec<(String, u64)>,
 }
 
 /// Margin around a window rect that its shadow extends into (for damage rects).
@@ -866,6 +939,10 @@ impl Desktop {
             editor_status: "no file open — open one from Files".to_string(),
             calc: Calc::new(),
             files_scroll: 0,
+            qasm_buf: "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nh q[0];\ncx q[0],q[1];\nmeasure q[0] -> c[0];\nmeasure q[1] -> c[1];\n".to_string(),
+            qasm_path: None,
+            qasm_status: "Bell template loaded · F4 compile · F5 run · F2 save".to_string(),
+            qasm_result: Vec::new(),
         }
     }
 
@@ -946,8 +1023,8 @@ impl Desktop {
                         return;
                     }
                 }
-                // Controls: Run / Clear / Q- / Q+ / angle.
-                for i in 0..5 {
+                // Controls: Run / Clear / Q- / Q+ / angle / export-to-QASM.
+                for i in 0..6 {
                     if qlab_ctl_rect(wr, i).contains(cx, cy) {
                         match i {
                             0 => self.qlab_run(),
@@ -971,9 +1048,14 @@ impl Desktop {
                                     self.mark_top_window();
                                 }
                             }
-                            _ => {
+                            4 => {
                                 self.qlab_angle = if self.qlab_angle >= 8 { 1 } else { self.qlab_angle + 1 };
                                 self.mark_top_window();
+                            }
+                            _ => {
+                                // Export the circuit as OpenQASM source and open it in the Studio.
+                                let src = self.qlab_to_qasm();
+                                self.qasm_open(None, src);
                             }
                         }
                         return;
@@ -1014,6 +1096,19 @@ impl Desktop {
                 if calc_clear_rect(wr).contains(cx, cy) {
                     self.calc.input('C');
                     self.mark_top_window();
+                }
+            }
+            AppKind::Qasm => {
+                if qasm_btn_rect(wr, 0).contains(cx, cy) {
+                    self.qasm_compile();
+                    return;
+                }
+                if qasm_btn_rect(wr, 1).contains(cx, cy) {
+                    self.qasm_run_buf();
+                    return;
+                }
+                if qasm_btn_rect(wr, 2).contains(cx, cy) {
+                    self.qasm_save();
                 }
             }
             AppKind::Terminal | AppKind::Monitor | AppKind::Devices | AppKind::Processes => {}
@@ -1315,9 +1410,20 @@ impl Desktop {
             self.mark_full();
             return;
         };
+        // `.qasm` sources open in QASM Studio (the quantum toolchain); everything else in the
+        // plain Text Editor.
+        let is_qasm = name.ends_with(".qasm");
         if self.files_on_disk {
-            self.editor_open(&format!("disk:{}", name));
-            self.open_app(AppKind::Editor);
+            let path = format!("disk:{}", name);
+            if is_qasm {
+                let content = crate::diskfs::read(name.as_bytes())
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .unwrap_or_default();
+                self.qasm_open(Some(path), content);
+            } else {
+                self.editor_open(&path);
+                self.open_app(AppKind::Editor);
+            }
             return;
         }
         if crate::fs::is_dir(self.files_path(&name).as_bytes()) {
@@ -1326,8 +1432,15 @@ impl Desktop {
             return;
         }
         let path = self.files_path(&name);
-        self.editor_open(&path);
-        self.open_app(AppKind::Editor);
+        if is_qasm {
+            let content = crate::fs::read(path.as_bytes())
+                .map(|b| String::from_utf8_lossy(&b).into_owned())
+                .unwrap_or_default();
+            self.qasm_open(Some(path), content);
+        } else {
+            self.editor_open(&path);
+            self.open_app(AppKind::Editor);
+        }
     }
 
     /// Load `path` into the Text Editor buffer. A `disk:` prefix targets the persistent disk
@@ -1453,6 +1566,110 @@ impl Desktop {
     /// The focused window: the topmost one, unless it is minimized (then nothing has focus).
     fn focused(&self) -> Option<&Win> {
         self.wins.last().filter(|w| !w.minimized)
+    }
+
+    // ---- QASM Studio (in-OS quantum toolchain: edit → compile → run) ----
+    /// Compile the buffer: parse + validate, then run the transpile passes (self-inverse pair
+    /// cancellation + depth analysis) and report the stats — errors land in the status line.
+    fn qasm_compile(&mut self) {
+        use crate::quantum::{parser, sim, transpile};
+        match parser::parse_qasm2(self.qasm_buf.as_bytes()) {
+            Ok(prog) => {
+                if prog.n_qubits == 0 || prog.n_qubits > sim::MAX_QUBITS {
+                    self.qasm_status = format!("error: qubit count {} out of range (1..={})", prog.n_qubits, sim::MAX_QUBITS);
+                } else {
+                    let before = prog.instructions.len();
+                    let (opt, removed) = transpile::cancel_pairs(prog.instructions);
+                    let d = transpile::depth(&opt, prog.n_qubits);
+                    self.qasm_status = if removed > 0 {
+                        format!("compiled: {} qubits · {} -> {} gates ({} cancelled) · depth {}", prog.n_qubits, before, opt.len(), removed, d)
+                    } else {
+                        format!("compiled: {} qubits · {} gates · depth {}", prog.n_qubits, before, d)
+                    };
+                }
+            }
+            Err(e) => self.qasm_status = format!("parse error: {:?}", e),
+        }
+        self.mark_top_window();
+    }
+
+    /// Run the buffer on the simulator (through the optimizer) and keep the top outcomes.
+    fn qasm_run_buf(&mut self) {
+        use crate::quantum::{parser, sim, transpile};
+        match parser::parse_qasm2(self.qasm_buf.as_bytes()) {
+            Ok(prog) => {
+                let (opt, _) = transpile::cancel_pairs(prog.instructions);
+                match sim::run_program(prog.n_qubits, prog.n_cbits.max(prog.n_qubits), opt, QLAB_SHOTS) {
+                    Some(res) => {
+                        let mut pairs: Vec<(String, u64)> =
+                            res.counts.iter().map(|(k, v)| (k.clone(), *v)).collect();
+                        pairs.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+                        pairs.truncate(4);
+                        self.qasm_result = pairs;
+                        self.qasm_status = format!("ran {} shots on {} qubits", QLAB_SHOTS, res.n_qubits);
+                    }
+                    None => self.qasm_status = "error: qubit count out of range".to_string(),
+                }
+            }
+            Err(e) => self.qasm_status = format!("parse error: {:?}", e),
+        }
+        self.mark_top_window();
+    }
+
+    /// Save the buffer to its backing file (RAM fs or `disk:`), defaulting to `draft.qasm`.
+    fn qasm_save(&mut self) {
+        let path = self.qasm_path.clone().unwrap_or_else(|| "draft.qasm".to_string());
+        let res = match path.strip_prefix("disk:") {
+            Some(name) => crate::diskfs::write(name.as_bytes(), self.qasm_buf.as_bytes()),
+            None => crate::fs::write(path.as_bytes(), self.qasm_buf.as_bytes()),
+        };
+        self.qasm_status = match res {
+            Ok(()) => {
+                self.qasm_path = Some(path.clone());
+                format!("saved {} ({} B)", path, self.qasm_buf.len())
+            }
+            Err(e) => format!("save error: {}", e),
+        };
+        self.mark_top_window();
+    }
+
+    /// Open a QASM source in the Studio (used by Files for `.qasm` and by the Lab's export).
+    fn qasm_open(&mut self, path: Option<String>, content: String) {
+        self.qasm_buf = content;
+        self.qasm_path = path;
+        self.qasm_result.clear();
+        self.qasm_status = match &self.qasm_path {
+            Some(p) => format!("editing {}", p),
+            None => "exported from Quantum Lab (unsaved)".to_string(),
+        };
+        self.open_app(AppKind::Qasm);
+    }
+
+    /// Serialize the Quantum Lab circuit to OpenQASM 2.0 source.
+    fn qlab_to_qasm(&self) -> String {
+        let mut gates = self.qlab_gates.clone();
+        gates.sort_by_key(|g| (g.col, g.q));
+        let mut out = format!("OPENQASM 2.0;\nqreg q[{}];\ncreg c[{}];\n", self.qlab_qubits, self.qlab_qubits);
+        for g in gates.iter().filter(|g| g.q < self.qlab_qubits && g.q2 < self.qlab_qubits) {
+            // Always emit the parser-friendly product form (e.g. `3*pi/4`).
+            let th = format!("{}*pi/4", g.angle);
+            match g.kind {
+                QG::H => out.push_str(&format!("h q[{}];\n", g.q)),
+                QG::X => out.push_str(&format!("x q[{}];\n", g.q)),
+                QG::Y => out.push_str(&format!("y q[{}];\n", g.q)),
+                QG::Z => out.push_str(&format!("z q[{}];\n", g.q)),
+                QG::S => out.push_str(&format!("s q[{}];\n", g.q)),
+                QG::T => out.push_str(&format!("t q[{}];\n", g.q)),
+                QG::Rx => out.push_str(&format!("rx({}) q[{}];\n", th, g.q)),
+                QG::Ry => out.push_str(&format!("ry({}) q[{}];\n", th, g.q)),
+                QG::Rz => out.push_str(&format!("rz({}) q[{}];\n", th, g.q)),
+                QG::Cx => out.push_str(&format!("cx q[{}],q[{}];\n", g.q, g.q2)),
+            }
+        }
+        for q in 0..self.qlab_qubits {
+            out.push_str(&format!("measure q[{}] -> c[{}];\n", q, q));
+        }
+        out
     }
 
     /// True if the focused (topmost) window is the Terminal — then typed keys go to it.
@@ -1803,6 +2020,56 @@ impl Desktop {
                     ty += line_h;
                 }
             }
+            AppKind::Qasm => {
+                // Toolbar: Compile / Run / Save.
+                for (i, label) in ["Compile", "Run", "Save"].iter().enumerate() {
+                    let b = qasm_btn_rect(r, i);
+                    let accent = i == 1;
+                    s.rounded_rect(b, 7, if accent { theme.accent } else { theme.surface_alt });
+                    let lw = fr.text_width(label, 13.0);
+                    fr.draw_text(s, b.x + (b.w - lw) / 2, b.y + 18, label, 13.0, if accent { theme.on_accent } else { theme.text });
+                }
+                fr.draw_text(s, r.x + 16 + 3 * 96 + 8, r.y + HEADER_H + 28, "F4 · F5 · F2 · F10 close", 11.0, theme.text_dim);
+                // Status line (compiler output / errors).
+                fr.draw_text(s, r.x + 16, r.y + HEADER_H + 52, &self.qasm_status, 12.0, theme.text_dim);
+                // Code area with the tail visible (same model as the Text Editor).
+                let res_h = if self.qasm_result.is_empty() { 0 } else { 96 };
+                let area = Rect::new(r.x + 12, r.y + HEADER_H + 62, r.w - 24, r.h - HEADER_H - 74 - res_h);
+                s.rounded_rect(area, 8, qos_ui::rgb(0x10, 0x12, 0x18));
+                let tx = area.x + 12;
+                let line_h = 18;
+                let max_rows = ((area.h - 16) / line_h).max(1) as usize;
+                let mono = qos_ui::rgb(0xd8, 0xdc, 0xe4);
+                let key_col = qos_ui::rgb(0x7a, 0xc8, 0xb0);
+                let lines: Vec<&str> = self.qasm_buf.split('\n').collect();
+                let total = lines.len();
+                let start = total.saturating_sub(max_rows);
+                let mut ty = area.y + 22;
+                for (li, line) in lines.iter().enumerate().skip(start) {
+                    let is_last = li + 1 == total;
+                    let shown = if is_last { format!("{}_", line) } else { (*line).to_string() };
+                    // Light syntax hint: gate/keyword lines tinted.
+                    let col = if line.starts_with("OPENQASM") || line.starts_with("qreg") || line.starts_with("creg") || line.starts_with("measure") {
+                        key_col
+                    } else {
+                        mono
+                    };
+                    fr.draw_text(s, tx, ty, &shown, 13.0, col);
+                    ty += line_h;
+                }
+                // Result histogram under the code area.
+                if !self.qasm_result.is_empty() {
+                    let mut hy = area.bottom() + 8;
+                    let bar_max = r.w - 170;
+                    for (bits, count) in self.qasm_result.iter() {
+                        fr.draw_text(s, r.x + 16, hy + 13, bits, 13.0, theme.text);
+                        let bw = ((*count as i64 * bar_max as i64) / QLAB_SHOTS as i64) as i32;
+                        s.rounded_rect(Rect::new(r.x + 86, hy + 2, bw.max(3), 14), 4, theme.accent);
+                        fr.draw_text(s, r.x + 92 + bw.max(3), hy + 13, &format!("{}", count), 12.0, theme.text_dim);
+                        hy += 20;
+                    }
+                }
+            }
             AppKind::Quantum => {
                 // Gate palette (selected gate highlighted).
                 for (i, (_, label)) in QLAB_PALETTE.iter().enumerate() {
@@ -1814,12 +2081,13 @@ impl Desktop {
                 }
                 // Controls.
                 let angle_lbl = format!("A = {}", qlab_angle_label(self.qlab_angle));
-                let ctls: [(usize, &str, bool); 5] = [
+                let ctls: [(usize, &str, bool); 6] = [
                     (0, "Run", true),
                     (1, "Clear", false),
                     (2, "-", false),
                     (3, "+", false),
                     (4, angle_lbl.as_str(), false),
+                    (5, "QASM", false),
                 ];
                 for (i, label, accent) in ctls {
                     let b = qlab_ctl_rect(r, i);
@@ -2478,6 +2746,14 @@ pub fn run_demo() {
                         crate::framebuffer::reset_cursor();
                         return; // Esc → shell (from anywhere)
                     }
+                    if scancode == 0x44 {
+                        // F10 closes the focused window from ANY app — the universal keyboard
+                        // escape hatch (text-entry apps consume letters, so 'w' can't be it).
+                        if desk.wins.pop().is_some() {
+                            desk.mark_full();
+                        }
+                        continue;
+                    }
                     if desk.files_naming_active() {
                         // The Files naming modal captures typing.
                         match scancode {
@@ -2528,6 +2804,29 @@ pub fn run_demo() {
                                 if let Some(c) = scancode_to_char(scancode, shift) {
                                     if desk.editor_buf.len() < 32 * 1024 {
                                         desk.editor_buf.push(c);
+                                        desk.mark_top_window();
+                                    }
+                                }
+                            }
+                        }
+                    } else if desk.focused().map_or(false, |w| w.kind == AppKind::Qasm) {
+                        // Focused QASM Studio: code editing + toolchain function keys.
+                        match scancode {
+                            0x3E => desk.qasm_compile(), // F4
+                            0x3F => desk.qasm_run_buf(), // F5
+                            0x3C => desk.qasm_save(),    // F2
+                            0x0E => {
+                                desk.qasm_buf.pop();
+                                desk.mark_top_window();
+                            } // Backspace
+                            0x1C => {
+                                desk.qasm_buf.push('\n');
+                                desk.mark_top_window();
+                            } // Enter → newline
+                            _ => {
+                                if let Some(c) = scancode_to_char(scancode, shift) {
+                                    if desk.qasm_buf.len() < 32 * 1024 {
+                                        desk.qasm_buf.push(c);
                                         desk.mark_top_window();
                                     }
                                 }
@@ -2591,6 +2890,10 @@ pub fn run_demo() {
                                     } else if c == 'a' {
                                         desk.qlab_angle = if desk.qlab_angle >= 8 { 1 } else { desk.qlab_angle + 1 };
                                         desk.mark_top_window();
+                                    } else if c == 'e' {
+                                        // Export the circuit to QASM Studio.
+                                        let src = desk.qlab_to_qasm();
+                                        desk.qasm_open(None, src);
                                     }
                                 }
                             }
@@ -2631,8 +2934,8 @@ pub fn run_demo() {
                                 desk.theme = desk.theme.toggled();
                                 desk.mark_full();
                             } // t
-                            s @ 0x02..=0x0A => {
-                                // Number keys 1–9 open the dock apps in order.
+                            s @ 0x02..=0x0B => {
+                                // Number keys 1–9 and 0 (10th) open the dock apps in order.
                                 let idx = (s - 0x02) as usize;
                                 if idx < APPS.len() {
                                     desk.open_app(APPS[idx]);
