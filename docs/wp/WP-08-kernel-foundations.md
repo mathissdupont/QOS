@@ -3,7 +3,8 @@
 - Status: 🟡 in progress (slice 1 done)
 - Epic: E-11 (SMP later), E-30 (processes), E-31 (syscalls)
 - ADRs: ADR-0020 (CPU hardening baseline); new ADRs per slice below
-- Commits: 43d10e0 (slice 1: preemptive scheduler armed under the desktop + background quantum jobs)
+- Commits: 43d10e0 (slice 1: preemptive scheduler armed under the desktop + background quantum
+  jobs), 5dbe995 (slice 2: W^X enforced + page-table audit)
 
 ## Goal
 
@@ -23,8 +24,14 @@ share kernel memory), and kernel mappings are not W^X-audited. A real OS needs r
   accepting input and redrawing; result arrived with the exact physical split (0¹⁶ 529 / 1¹⁶ 471).
   *(Original "compositor becomes a thread itself" reworded: the desktop stays the main context —
   full compositor-as-thread lands with slice 3's process model if needed.)*
-- [ ] **Slice 2 — W^X audit.** Walk kernel mappings; make code RX, data RW+NX, rodata RO+NX
-  (NX/WP already enforced by ADR-0020). New ADR documenting the layout.
+- [x] **Slice 2 — W^X enforced + audited (5dbe995).** Found and closed the real hole: the 64 MiB
+  kernel **heap was W+X** (mapped without NX). Heap pages now carry NO_EXECUTE, with EFER.NXE
+  enabled before the mapping (NX is a reserved PTE bit while NXE is off — ordering documented).
+  `security::wx_audit()` walks the live page table (1G/2M/4K leaves) and reports W+X pages at
+  boot + in the Settings Security row. **Result: 0 W+X pages of ~268 M mapped** (bootloader
+  mappings were already NX). Regression-proof: the preemptive quantum worker (stack + statevector
+  on the NX heap) runs to completion. *(A dedicated ADR is deferred until kernel sections get a
+  custom layout; today's layout is bootloader-ELF + our NX heap.)*
 - [ ] **Slice 3 — user-mode processes.** Build on `user.rs`/`syscall.rs`: load a flat/ELF binary
   into ring 3 with its own address space, syscall surface for fs/console, clean exit + reaping.
   Target: a userland `hello` + a userland QASM runner as the first real apps.
