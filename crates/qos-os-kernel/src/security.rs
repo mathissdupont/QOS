@@ -73,6 +73,96 @@ pub fn init() {
         if active & F_SMEP != 0 { "on" } else { "unsupported" },
         if active & F_SMAP != 0 { "on" } else { "unsupported" },
     );
+    // W^X audit (WP-08 s2): count writable+executable mappings after our own mappings exist.
+    wx_audit();
+}
+
+/// W+X page count from the boot-time audit (usize::MAX until the audit has run).
+static WX_PAGES: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(usize::MAX);
+
+/// Walk the active 4-level page table and count **W+X** leaf mappings (PRESENT + WRITABLE and
+/// not NO_EXECUTE) — pages where injected data could be executed. Counts 4 KiB units so huge
+/// pages weigh their true size. Read-only analysis; safe any time after paging is up.
+///
+/// Returns `(wx_4k_pages, total_mapped_4k_pages)` and caches the W+X count for the UI.
+pub fn wx_audit() -> (usize, usize) {
+    use x86_64::registers::control::Cr3;
+    use x86_64::structures::paging::PageTableFlags as F;
+
+    let phys_off = crate::memory::phys_offset().as_u64();
+    let table = |phys: u64| -> &'static [u64; 512] {
+        unsafe { &*((phys_off + phys) as *const [u64; 512]) }
+    };
+    let addr_mask: u64 = 0x000f_ffff_ffff_f000;
+
+    let (l4_frame, _) = Cr3::read();
+    let l4 = table(l4_frame.start_address().as_u64());
+    let (mut wx, mut total) = (0usize, 0usize);
+
+    let is_wx = |e: u64| -> bool {
+        let f = F::from_bits_truncate(e);
+        f.contains(F::PRESENT) && f.contains(F::WRITABLE) && !f.contains(F::NO_EXECUTE)
+    };
+
+    for &e4 in l4.iter() {
+        if e4 & 1 == 0 {
+            continue;
+        }
+        let l3 = table(e4 & addr_mask);
+        for &e3 in l3.iter() {
+            if e3 & 1 == 0 {
+                continue;
+            }
+            if e3 & (1 << 7) != 0 {
+                // 1 GiB page = 262144 × 4 KiB.
+                total += 262_144;
+                if is_wx(e3) {
+                    wx += 262_144;
+                }
+                continue;
+            }
+            let l2 = table(e3 & addr_mask);
+            for &e2 in l2.iter() {
+                if e2 & 1 == 0 {
+                    continue;
+                }
+                if e2 & (1 << 7) != 0 {
+                    // 2 MiB page = 512 × 4 KiB.
+                    total += 512;
+                    if is_wx(e2) {
+                        wx += 512;
+                    }
+                    continue;
+                }
+                let l1 = table(e2 & addr_mask);
+                for &e1 in l1.iter() {
+                    if e1 & 1 == 0 {
+                        continue;
+                    }
+                    total += 1;
+                    if is_wx(e1) {
+                        wx += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    WX_PAGES.store(wx, Ordering::Relaxed);
+    crate::serial_println!(
+        "[SEC] W^X audit: {} of {} mapped 4K-pages are W+X ({} MiB)",
+        wx,
+        total,
+        wx * 4 / 1024
+    );
+    (wx, total)
+}
+
+/// Cached W+X count for UI display (`None` before the audit ran).
+pub fn wx_pages() -> Option<usize> {
+    let v = WX_PAGES.load(Ordering::Relaxed);
+    if v == usize::MAX { None } else { Some(v) }
 }
 
 /// Human-readable one-line status for the UI (Settings / Monitor).
@@ -85,11 +175,17 @@ pub fn status_line() -> alloc::string::String {
             alloc::format!("{} off", name)
         }
     };
+    let wx = match wx_pages() {
+        Some(0) => alloc::string::String::from("W^X clean"),
+        Some(n) => alloc::format!("W+X {} pg", n),
+        None => alloc::string::String::from("W^X n/a"),
+    };
     alloc::format!(
-        "{} · {} · {} · {}",
+        "{} · {} · {} · {} · {}",
         mark(F_NX, "NX"),
         mark(F_WP, "WP"),
         mark(F_SMEP, "SMEP"),
-        mark(F_SMAP, "SMAP")
+        mark(F_SMAP, "SMAP"),
+        wx
     )
 }

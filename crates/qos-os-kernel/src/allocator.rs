@@ -21,6 +21,12 @@ pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), &'static str> {
+    // The heap PTEs below carry NO_EXECUTE, which is a *reserved* bit unless EFER.NXE is on —
+    // enable it here (idempotent; security::init re-affirms and reports later in boot).
+    unsafe {
+        use x86_64::registers::model_specific::{Efer, EferFlags};
+        Efer::update(|f| f.insert(EferFlags::NO_EXECUTE_ENABLE));
+    }
     let heap_start = VirtAddr::new(HEAP_START as u64);
     let heap_end = heap_start + (HEAP_SIZE as u64 - 1);
 
@@ -32,7 +38,9 @@ pub fn init_heap(
             .allocate_frame()
             .ok_or("frame allocation failed")?;
 
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        // W^X (ADR-0020 / WP-08 s2): the heap is data — never executable. With EFER.NXE on
+        // (security::init), NO_EXECUTE makes heap-sprayed shellcode unrunnable.
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
         unsafe {
             mapper
