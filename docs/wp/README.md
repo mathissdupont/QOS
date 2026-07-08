@@ -21,7 +21,7 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-06](WP-06-quantum-control-plane.md) | Quantum control plane: engine, visual lab, QASM toolchain | E-80 | ADR-0019/0021 | — | ✅ done |
 | [WP-07](WP-07-quantum-ide.md) | Quantum IDE (VS Code-like environment for circuits) | E-80, E-73 | ADR-0021 | — | ✅ done |
 | [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | [#7](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/7) | 🟡 in progress |
-| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | [#6](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/6) | 🔴 not started |
+| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018/0022 | [#6](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/6) | 🟡 in progress |
 | [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | [#5](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/5) | 🔴 not started |
 | [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | [#10](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/10) | 🟡 in progress |
 | [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | [#12](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/12) | 🔴 blocked on WP-10 |
