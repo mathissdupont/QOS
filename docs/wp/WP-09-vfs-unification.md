@@ -4,7 +4,7 @@
 - Epic: E-40/E-41 (storage & filesystems)
 - ADRs: ADR-0018 (AHCI storage); ADR-0022 (VFS mount model)
 - Issue: [#6](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/6)
-- Commits: (slice 1 commit appended on merge)
+- Commits: 10f0427 (slice 1: FileSystem trait + mount table + facade, ADR-0022)
 
 ## Goal
 
