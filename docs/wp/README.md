@@ -11,27 +11,28 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 
 ## Register
 
-| WP | Title | Epic | ADR | Status |
-|----|-------|------|-----|--------|
-| [WP-01](WP-01-uefi-boot-and-desktop.md) | UEFI boot repair + framebuffer desktop | E-70 (seed) | ADR-0014 | ✅ done |
-| [WP-02](WP-02-driver-model.md) | Device/driver model | E-01 | ADR-0016 | ✅ done |
-| [WP-03](WP-03-acpi-apic.md) | ACPI + modern APIC interrupts | E-10 | ADR-0015 | ✅ done |
-| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | ✅ done |
-| [WP-05](WP-05-modern-ui.md) | Modern UI: compositor, fonts, WM, 10 apps, storage UX | E-70..73 | ADR-0017/0018 | 🟡 in progress |
-| [WP-06](WP-06-quantum-control-plane.md) | Quantum control plane: engine, visual lab, QASM toolchain | E-80 | ADR-0019/0021 | ✅ done |
-| [WP-07](WP-07-quantum-ide.md) | Quantum IDE (VS Code-like environment for circuits) | E-80, E-73 | ADR-0021 | ✅ done |
-| [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | 🟡 in progress |
-| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | 🔴 not started |
-| [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | 🔴 not started |
-| [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | 🟡 in progress |
-| [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | 🔴 blocked on WP-10 |
-| [WP-13](WP-13-quantum-safe-security.md) | Quantum-safe security: PQC, kernel crypto, secure channels | E-54 | (new ADR) | 🔴 not started |
+| WP | Title | Epic | ADR | Issue | Status |
+| ---- | ------- | ------ | ----- | ------- | -------- |
+| [WP-01](WP-01-uefi-boot-and-desktop.md) | UEFI boot repair + framebuffer desktop | E-70 (seed) | ADR-0014 | — | ✅ done |
+| [WP-02](WP-02-driver-model.md) | Device/driver model | E-01 | ADR-0016 | — | ✅ done |
+| [WP-03](WP-03-acpi-apic.md) | ACPI + modern APIC interrupts | E-10 | ADR-0015 | — | ✅ done |
+| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | — | ✅ done |
+| [WP-05](WP-05-modern-ui.md) | Modern UI: compositor, fonts, WM, 10 apps, storage UX | E-70..73 | ADR-0017/0018 | [#11](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/11) | 🟡 in progress |
+| [WP-06](WP-06-quantum-control-plane.md) | Quantum control plane: engine, visual lab, QASM toolchain | E-80 | ADR-0019/0021 | — | ✅ done |
+| [WP-07](WP-07-quantum-ide.md) | Quantum IDE (VS Code-like environment for circuits) | E-80, E-73 | ADR-0021 | — | ✅ done |
+| [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | [#7](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/7) | 🟡 in progress |
+| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | [#6](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/6) | 🔴 not started |
+| [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | [#5](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/5) | 🔴 not started |
+| [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | [#10](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/10) | 🟡 in progress |
+| [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | [#12](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/12) | 🔴 blocked on WP-10 |
+| [WP-13](WP-13-quantum-safe-security.md) | Quantum-safe security: PQC, kernel crypto, secure channels | E-54 | (new ADR) | [#19](https://github.com/Heptapus-Open-Code-Organization/QOS/issues/19) | 🔴 not started |
 
-Upcoming (not yet opened as WP files; see the master-plan critical path and
-[`../TRANSFER_AND_ISSUE_PLAN.md`](../TRANSFER_AND_ISSUE_PLAN.md)):
-PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · block layer + NVMe/virtio-blk
-(E-23/E-24/E-40) · libc/SDK (E-51) · init/services/logging (E-53) · sound · power management
-(clean ACPI shutdown/reboot).
+All remaining epics are tracked as detailed [GitHub issues](https://github.com/Heptapus-Open-Code-Organization/QOS/issues)
+with milestones M1–M4: PCIe ECAM + MSI (#8) · block layer + NVMe/virtio-blk (#9) · VMM
+maturation (#20) · time & sleep (#21) · USB mass storage (#22) · quantum engine depth:
+noise/mitigation/calibration/hybrid (#23) · users/permissions (#24) · CI/QEMU test harness
+(#25) · packaging (#26) · crash-consistent QOSFS (#27) · audio (#28) · power management (#13) ·
+real-hardware matrix (#14) · libc/SDK (#15) · init/services/logging (#16).
 
 ## Gaps & correctness backlog
 
@@ -77,24 +78,23 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
   autocompletion, QASM import into the visual Lab (code → circuit), per-glyph click-to-position
   metrics. *(open)*
 - **G-18** PCIe ECAM + MSI/MSI-X are not implemented yet. This blocks the clean modern-device path
-  for NVMe, virtio, newer NICs and MSI-capable USB/storage devices. *(open; issue draft in
-  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+  for NVMe, virtio, newer NICs and MSI-capable USB/storage devices. *(open; issue #8)*
 - **G-19** No uniform block layer/request queue/cache yet; AHCI/QOSFS exists, but filesystems and
   modern storage drivers need a shared block-device contract before NVMe/virtio-blk can mature.
-  *(open; issue draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+  *(open; issue #9)*
 - **G-20** Ring-3 exists, but there is no libc/SDK path for third-party userland apps. Raw syscall
   demos prove the kernel path; a real OS needs documented build/link/run support. *(open; issue
-  draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+  #15)*
 - **G-21** No init/service manager or dmesg/syslog-style service logging yet; background work is
-  still exposed as bespoke kernel/UI state. *(open; issue draft in
-  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
-- **G-22** Transfer-to-organization follow-up: after moving the repository under Heptapus Open Code
-  Organization, open WP/gap issues in priority order and update the local `origin` remote. *(open;
-  checklist in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+  still exposed as bespoke kernel/UI state. *(open; issue #16)*
+- **G-22** ~~Transfer-to-organization follow-up~~ → **resolved**: repository transferred to
+  Heptapus Open Code Organization, `origin` updated, and the full backlog opened as 24 detailed
+  issues with labels (`type:*`, `area:*`, `priority:*`) and milestones M1–M4. *(closed 2026-07-08)*
 - **G-23** Cryptography today is classical-only or absent: the TLS path is a stub (G-07) and the
-  kernel offers no PQC, no vetted hash/AEAD surface. Quantum-safe policy adopted → WP-13. *(open)*
+  kernel offers no PQC, no vetted hash/AEAD surface. Quantum-safe policy adopted → WP-13. *(open;
+  issue #19)*
 - **G-24** No kernel entropy source or CSPRNG API: RDSEED/RDRAND are unused and quantum shot
   sampling runs on an ad-hoc PRNG. One entropy-fed CSPRNG should serve both → WP-13 slice 2.
-  *(open)*
+  *(open; issue #19)*
 - **G-25** No CI-run QEMU integration harness: boot smoke tests, serial assertions, and
-  screenshot checks exist only as ad-hoc local scripts. → E-90 testing issue. *(open)*
+  screenshot checks exist only as ad-hoc local scripts. → E-90 testing issue. *(open; issue #25)*
