@@ -32,6 +32,18 @@ Relevant areas include:
 - credential/token handling in future cloud QPU paths;
 - build/release-chain issues.
 
+## Quantum-Safe Direction
+
+QOS adopts a quantum-safe cryptography policy: cryptographic surfaces (cloud QPU provider
+channels, update/release signing, secrets at rest) are designed around NIST post-quantum
+standards — ML-KEM (FIPS 203), ML-DSA (FIPS 204), SLH-DSA (FIPS 205) — hybridized with
+classical algorithms during the transition. The plan, algorithm suite, and status live in
+`docs/wp/WP-13-quantum-safe-security.md`. Reports about weaknesses in this design (algorithm
+choice, entropy handling, secret storage, downgrade paths) are explicitly in scope.
+
+No production-security claim is made until the implementation has had professional
+cryptographic review.
+
 ## Experimental Status
 
 QOS contains prototype and research-oriented subsystems. Experimental status does not make security

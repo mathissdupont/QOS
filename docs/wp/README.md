@@ -25,6 +25,7 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | 🔴 not started |
 | [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | 🟡 in progress |
 | [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | 🔴 blocked on WP-10 |
+| [WP-13](WP-13-quantum-safe-security.md) | Quantum-safe security: PQC, kernel crypto, secure channels | E-54 | (new ADR) | 🔴 not started |
 
 Upcoming (not yet opened as WP files; see the master-plan critical path and
 [`../TRANSFER_AND_ISSUE_PLAN.md`](../TRANSFER_AND_ISSUE_PLAN.md)):
@@ -90,3 +91,10 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
 - **G-22** Transfer-to-organization follow-up: after moving the repository under Heptapus Open Code
   Organization, open WP/gap issues in priority order and update the local `origin` remote. *(open;
   checklist in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-23** Cryptography today is classical-only or absent: the TLS path is a stub (G-07) and the
+  kernel offers no PQC, no vetted hash/AEAD surface. Quantum-safe policy adopted → WP-13. *(open)*
+- **G-24** No kernel entropy source or CSPRNG API: RDSEED/RDRAND are unused and quantum shot
+  sampling runs on an ad-hoc PRNG. One entropy-fed CSPRNG should serve both → WP-13 slice 2.
+  *(open)*
+- **G-25** No CI-run QEMU integration harness: boot smoke tests, serial assertions, and
+  screenshot checks exist only as ad-hoc local scripts. → E-90 testing issue. *(open)*

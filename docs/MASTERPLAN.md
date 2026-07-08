@@ -19,6 +19,9 @@ differentiator (ADR-0002). "Real and modern" concretely means:
   and POSIX-ish surface, users/permissions, and a real UI (compositor, scalable fonts, widgets).
 - Quantum computing as a **built-in subsystem**: simulator (done), transpilation, error
   mitigation, calibration, multi-backend + cloud QPU, hybrid execution, and dev tools.
+- **Quantum-safe by design**: every cryptographic surface (provider channels, update signing,
+  secrets at rest) uses NIST post-quantum algorithms, hybridized with classical crypto during
+  the transition — an OS built for a quantum world must not be broken by one (WP-13).
 
 ### Honest framing
 
@@ -94,6 +97,10 @@ Each epic lists its rough size and key dependencies. IDs (E-xx) are for cross-re
 - **E-52 Users, permissions, security** (L). Accounts/login, file permissions enforcement,
   privilege boundaries, basic MAC; secure-by-default posture.
 - **E-53 Init & services** (M). PID 1, service/dependency manager, logging (dmesg/syslog).
+- **E-54 Quantum-safe cryptography** (M/L). Kernel crypto module on NIST PQC — ML-KEM (FIPS 203)
+  key establishment, ML-DSA/SLH-DSA (FIPS 204/205) signatures, hybridized with X25519/Ed25519 —
+  plus an entropy-fed CSPRNG (RDSEED/RDRAND + jitter), KAT self-tests at boot, sealed secrets,
+  and signed updates. Mandatory before WP-12 carries real credentials. *WP-13, new ADR.*
 
 ### P5 — Networking
 - **E-60 Robust TCP/IP** (M). Harden the stack (retransmit, windows, timers), sockets syscalls,
@@ -152,7 +159,8 @@ Three tracks can advance in parallel: **hardware** (needs the driver model + API
   UEFI laptop/VM has working keyboard, mouse, display, network.
 - **M3 — "Multi-core + storage":** E-11 SMP + E-23/E-24 block storage + E-40/E-41 filesystems.
 - **M4 — "Modern desktop":** E-70/E-71/E-72/E-73 — compositor, scalable fonts, widgets, apps.
-- **M5 — "Quantum OS":** E-80–E-85 — transpile, mitigation, cloud QPU, hybrid, tools.
+- **M5 — "Quantum OS":** E-80–E-85 + E-54 — transpile, mitigation, cloud QPU, hybrid, tools,
+  and the quantum-safe crypto layer that secures the cloud path.
 - **M6 — "Product":** E-51 SDK/libc, E-52 security, E-91 packaging, E-92 installer + real-HW.
 
 ## 7. Immediate next steps
