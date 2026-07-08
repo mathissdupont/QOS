@@ -110,6 +110,9 @@ with ADR-0002 (QPU control-plane framing) and ADR-0003 (layered architecture).
 Contributions are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md) and
 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). All repository content is in English.
 
+For security-sensitive reports, see [SECURITY.md](SECURITY.md) and avoid posting exploit details
+or credentials in public issues.
+
 ## License
 
 QOS is licensed under the **PolyForm Noncommercial License 1.0.0** — a source-available license
