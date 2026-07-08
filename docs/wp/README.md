@@ -26,9 +26,11 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | 🟡 in progress |
 | [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | 🔴 blocked on WP-10 |
 
-Upcoming (not yet opened as WP files; see the master-plan critical path):
-PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · NVMe (E-23) · sound · power
-management (clean ACPI shutdown/reboot).
+Upcoming (not yet opened as WP files; see the master-plan critical path and
+[`../TRANSFER_AND_ISSUE_PLAN.md`](../TRANSFER_AND_ISSUE_PLAN.md)):
+PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · block layer + NVMe/virtio-blk
+(E-23/E-24/E-40) · libc/SDK (E-51) · init/services/logging (E-53) · sound · power management
+(clean ACPI shutdown/reboot).
 
 ## Gaps & correctness backlog
 
@@ -73,3 +75,18 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
 - **G-17** Editor niceties deferred from WP-07 v1: text selections + clipboard, gate-name
   autocompletion, QASM import into the visual Lab (code → circuit), per-glyph click-to-position
   metrics. *(open)*
+- **G-18** PCIe ECAM + MSI/MSI-X are not implemented yet. This blocks the clean modern-device path
+  for NVMe, virtio, newer NICs and MSI-capable USB/storage devices. *(open; issue draft in
+  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-19** No uniform block layer/request queue/cache yet; AHCI/QOSFS exists, but filesystems and
+  modern storage drivers need a shared block-device contract before NVMe/virtio-blk can mature.
+  *(open; issue draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-20** Ring-3 exists, but there is no libc/SDK path for third-party userland apps. Raw syscall
+  demos prove the kernel path; a real OS needs documented build/link/run support. *(open; issue
+  draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-21** No init/service manager or dmesg/syslog-style service logging yet; background work is
+  still exposed as bespoke kernel/UI state. *(open; issue draft in
+  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-22** Transfer-to-organization follow-up: after moving the repository under Heptapus Open Code
+  Organization, open WP/gap issues in priority order and update the local `origin` remote. *(open;
+  checklist in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
