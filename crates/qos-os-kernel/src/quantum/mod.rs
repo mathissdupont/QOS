@@ -31,6 +31,9 @@ pub mod linalg;
 pub mod parser;
 pub mod sim;
 
+// Transpile passes: gate cancellation + depth analysis (WP-06, E-80)
+pub mod transpile;
+
 // Re-export core types
 #[allow(unused_imports)]
 pub use complex::Complex;

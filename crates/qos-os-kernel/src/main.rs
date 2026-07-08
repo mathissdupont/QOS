@@ -33,6 +33,7 @@ mod ui;
 mod vga;
 mod vga13h;     // VGA Mode 13h (320x200x256) pixel graphics — ADR-0013 Phase 1
 mod draw;       // Resolution-agnostic desktop drawing facade (VGA13h / framebuffer) — ADR-0014 Stage 3
+mod compositor; // Modern true-color compositor (qos-ui) — ADR-0017, epic E-70 (WP-05)
 mod device;     // Device/driver model integration (qos-driver) — ADR-0016, epic E-01
 mod apic;       // ACPI/APIC discovery (qos-acpi) — ADR-0015, epic E-10
 mod xhci;       // xHCI USB host-controller driver — ADR-0015, epic E-20 (WP-04)
@@ -49,6 +50,8 @@ mod pci;        // PCI bus enumeration
 mod acpi;       // ACPI power management
 mod fat16;      // FAT16 file system
 mod ahci;       // SATA AHCI driver
+mod security;   // CPU security hardening (NX/WP/SMEP/SMAP) — ADR-0020
+mod qjob;       // Background quantum jobs on a preemptive kernel thread — WP-08 s1
 mod syscall_ext;// Extended syscalls (open/read/write/close)
 mod net;        // Network stack
 mod e1000;      // Intel E1000 NIC driver
@@ -143,7 +146,8 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
         crate::serial_println!("[APIC] no RSDP from bootloader; APIC discovery skipped");
     }
     // acpi::init();      // ACPI - disabled (needs low memory mapping)
-    // ahci::init();      // SATA/AHCI - disabled (needs ACPI)
+    security::init();     // CPU hardening: NX + WP + SMEP/SMAP where supported (ADR-0020)
+    ahci::init();         // SATA/AHCI: discover the HBA via PCI BAR5, IDENTIFY the data disk (ADR-0018)
     syscall_ext::init();  // Extended syscalls
     
     // Initialize network
@@ -168,7 +172,22 @@ fn kernel_main(boot_info: &'static mut BootInfo) -> ! {
 
     splash::show_progress("System ready!");
 
-    // Wait for user to dismiss splash (skip in verify mode)
+    // Branded animated boot splash on the framebuffer (WP-05 step 2); fall back to the text splash
+    // wait otherwise. Skipped in verify mode for determinism.
+    #[cfg(not(feature = "verify"))]
+    {
+        if framebuffer::active() {
+            compositor::run_splash();
+            // Offer a boot choice: the modern desktop or the text shell. Choosing the desktop runs
+            // it here; pressing Esc inside it drops back to the shell below.
+            if compositor::boot_choice() {
+                compositor::run_demo();
+            }
+        } else {
+            splash::wait_for_continue();
+        }
+    }
+    #[cfg(feature = "verify")]
     splash::wait_for_continue();
 
     #[cfg(feature = "userdemo")]

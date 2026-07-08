@@ -130,6 +130,89 @@ fn pci_read_config8(bus: u8, device: u8, function: u8, offset: u8) -> u8 {
     ((val >> ((offset & 3) * 8)) & 0xFF) as u8
 }
 
+/// Write a 32-bit value to PCI configuration space (dword-aligned offset).
+fn pci_write_config32(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
+    let address = pci_address(bus, device, function, offset);
+    unsafe {
+        arch::outl(PCI_CONFIG_ADDRESS, address);
+        arch::outl(PCI_CONFIG_DATA, value);
+    }
+}
+
+/// Write a 16-bit value to PCI configuration space (read-modify-write of the containing dword).
+fn pci_write_config16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let dword = pci_read_config32(bus, device, function, offset & 0xFC);
+    let shift = (offset & 2) * 8;
+    let cleared = dword & !(0xFFFFu32 << shift);
+    pci_write_config32(bus, device, function, offset & 0xFC, cleared | ((value as u32) << shift));
+}
+
+// ---- Public config-space accessors keyed by a discovered `PciDevice` (used by MSI setup, etc.) ----
+
+/// Read a 32-bit config-space dword from `dev` at `offset`.
+pub fn config_read32(dev: &PciDevice, offset: u8) -> u32 {
+    pci_read_config32(dev.bus, dev.device, dev.function, offset)
+}
+
+/// Read a 16-bit config-space word from `dev` at `offset`.
+pub fn config_read16(dev: &PciDevice, offset: u8) -> u16 {
+    pci_read_config16(dev.bus, dev.device, dev.function, offset)
+}
+
+/// Write a 32-bit config-space dword to `dev` at `offset`.
+pub fn config_write32(dev: &PciDevice, offset: u8, value: u32) {
+    pci_write_config32(dev.bus, dev.device, dev.function, offset, value);
+}
+
+/// Write a 16-bit config-space word to `dev` at `offset`.
+pub fn config_write16(dev: &PciDevice, offset: u8, value: u16) {
+    pci_write_config16(dev.bus, dev.device, dev.function, offset, value);
+}
+
+/// Find a PCI capability by id in `dev`'s capability list; returns its config-space offset.
+///
+/// Walks the standard linked list at 0x34 (only if the Capabilities List status bit is set). Common
+/// ids: 0x05 = MSI, 0x11 = MSI-X, 0x10 = PCIe.
+pub fn find_capability(dev: &PciDevice, cap_id: u8) -> Option<u8> {
+    // Status register (0x06) bit 4 = Capabilities List present.
+    let status = pci_read_config16(dev.bus, dev.device, dev.function, 0x06);
+    if status & (1 << 4) == 0 {
+        return None;
+    }
+    let mut ptr = pci_read_config8(dev.bus, dev.device, dev.function, 0x34) & 0xFC;
+    // Bounded walk (config space is 256 bytes; guard against loops).
+    for _ in 0..48 {
+        if ptr == 0 {
+            break;
+        }
+        let id = pci_read_config8(dev.bus, dev.device, dev.function, ptr);
+        if id == cap_id {
+            return Some(ptr);
+        }
+        ptr = pci_read_config8(dev.bus, dev.device, dev.function, ptr + 1) & 0xFC;
+    }
+    None
+}
+
+/// List all capability `(id, offset)` pairs in `dev`'s capability list (diagnostic).
+pub fn capabilities(dev: &PciDevice) -> Vec<(u8, u8)> {
+    let mut caps = Vec::new();
+    let status = pci_read_config16(dev.bus, dev.device, dev.function, 0x06);
+    if status & (1 << 4) == 0 {
+        return caps;
+    }
+    let mut ptr = pci_read_config8(dev.bus, dev.device, dev.function, 0x34) & 0xFC;
+    for _ in 0..48 {
+        if ptr == 0 {
+            break;
+        }
+        let id = pci_read_config8(dev.bus, dev.device, dev.function, ptr);
+        caps.push((id, ptr));
+        ptr = pci_read_config8(dev.bus, dev.device, dev.function, ptr + 1) & 0xFC;
+    }
+    caps
+}
+
 /// Check if a PCI device exists at the given location
 fn device_exists(bus: u8, device: u8, function: u8) -> bool {
     pci_read_config16(bus, device, function, 0x00) != 0xFFFF

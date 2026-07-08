@@ -1,0 +1,4 @@
+Roboto-Regular.ttf — Roboto font family, Copyright 2011 Google Inc.
+Licensed under the Apache License, Version 2.0.
+https://www.apache.org/licenses/LICENSE-2.0
+Embedded in QOS as the default UI typeface (WP-05 / ADR-0017), unmodified.

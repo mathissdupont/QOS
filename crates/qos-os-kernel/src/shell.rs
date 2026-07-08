@@ -88,7 +88,7 @@ pub fn alias_list() -> alloc::vec::Vec<(String, String)> {
 
 /// List of all available shell commands for tab completion
 static COMMANDS: &[&[u8]] = &[
-    b"help", b"kbd", b"clear", b"gfx", b"gdesk", b"evtest", b"threadtest", b"proctest", b"faulttest", b"exittest", b"regabitest", b"wxtest", b"ipctest", b"crash", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
+    b"help", b"kbd", b"clear", b"gfx", b"gdesk", b"modern", b"evtest", b"threadtest", b"proctest", b"faulttest", b"exittest", b"regabitest", b"wxtest", b"ipctest", b"crash", b"ticks", b"ps", b"pwd", b"cd", b"ls", b"cat", b"rm",
     b"mkdir", b"mkbell", b"edit", b"touch", b"submit", b"write",
     b"disk-id", b"disk-read", b"mkfs", b"dls", b"dcat", b"drm", b"dput", b"dget", b"dsubmit",
     b"vls", b"vcat", b"vrm", b"vcp", b"vsubmit",
@@ -1707,6 +1707,10 @@ impl ShellTask {
         } else if Self::eq(cmd, b"gdesk") {
             crate::println!("Launching graphical desktop (move mouse, drag/close window, ESC to exit)...");
             crate::gfxui::run();
+            crate::println!("Back in text mode.");
+        } else if Self::eq(cmd, b"modern") {
+            crate::println!("Launching modern desktop (native-res compositor). 't' toggles light/dark, ESC exits...");
+            crate::compositor::run_demo();
             crate::println!("Back in text mode.");
         } else if Self::eq(cmd, b"crash") {
             // Diagnostic: deliberately dereference an unmapped address to exercise the

@@ -12,12 +12,21 @@ use x86_64::{
 static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
 pub const HEAP_START: usize = 0x4444_4444_0000;
-pub const HEAP_SIZE: usize = 1024 * 1024; // 1 MiB
+// 64 MiB — headroom for the modern UI (WP-05): a native-resolution true-color back buffer is
+// ~4 MB at 1280×800 and ~8 MB at 1920×1080, plus per-window surfaces, the glyph cache, and app
+// state. Mapped eagerly at boot; fits comfortably on any machine with ≥256 MiB RAM.
+pub const HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 pub fn init_heap(
     mapper: &mut impl Mapper<Size4KiB>,
     frame_allocator: &mut impl FrameAllocator<Size4KiB>,
 ) -> Result<(), &'static str> {
+    // The heap PTEs below carry NO_EXECUTE, which is a *reserved* bit unless EFER.NXE is on —
+    // enable it here (idempotent; security::init re-affirms and reports later in boot).
+    unsafe {
+        use x86_64::registers::model_specific::{Efer, EferFlags};
+        Efer::update(|f| f.insert(EferFlags::NO_EXECUTE_ENABLE));
+    }
     let heap_start = VirtAddr::new(HEAP_START as u64);
     let heap_end = heap_start + (HEAP_SIZE as u64 - 1);
 
@@ -29,7 +38,9 @@ pub fn init_heap(
             .allocate_frame()
             .ok_or("frame allocation failed")?;
 
-        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE;
+        // W^X (ADR-0020 / WP-08 s2): the heap is data — never executable. With EFER.NXE on
+        // (security::init), NO_EXECUTE makes heap-sprayed shellcode unrunnable.
+        let flags = PageTableFlags::PRESENT | PageTableFlags::WRITABLE | PageTableFlags::NO_EXECUTE;
 
         unsafe {
             mapper
@@ -44,6 +55,12 @@ pub fn init_heap(
     }
 
     Ok(())
+}
+
+/// Current heap usage as `(used_bytes, total_bytes)` — surfaced by the System Monitor app.
+pub fn heap_stats() -> (usize, usize) {
+    let h = ALLOCATOR.lock();
+    (h.used(), HEAP_SIZE)
 }
 
 #[alloc_error_handler]

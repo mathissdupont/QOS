@@ -67,3 +67,5 @@ target/
 *.zip
 *.tar.gz
 *.rar
+# Stray non-QOS doc synced into this dir by OneDrive (Agencytic project); ignore.
+geo.md

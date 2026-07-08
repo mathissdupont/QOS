@@ -1,8 +1,8 @@
 # QOS Master Plan — the road to a real, modern operating system
 
-Status: living document, created 2026-07-01. This is the authoritative long-range plan. It
-supersedes the historical `ROADMAP.md` (kept for archive). Short-range execution detail lives in
-`docs/PLAN.md`; every structural decision is (or becomes) an ADR in `docs/adr/`.
+Status: living document, created 2026-07-01. This is the authoritative long-range plan (it
+superseded the earlier `ROADMAP.md`/`VISION.md`, since removed). Short-range execution detail
+lives in `docs/PLAN.md`; every structural decision is (or becomes) an ADR in `docs/adr/`.
 
 ## 1. Vision
 

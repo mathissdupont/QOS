@@ -16,11 +16,21 @@ Use [`template.md`](template.md) for new WPs. Statuses: 🔴 not started · 🟡
 | [WP-01](WP-01-uefi-boot-and-desktop.md) | UEFI boot repair + framebuffer desktop | E-70 (seed) | ADR-0014 | ✅ done |
 | [WP-02](WP-02-driver-model.md) | Device/driver model | E-01 | ADR-0016 | ✅ done |
 | [WP-03](WP-03-acpi-apic.md) | ACPI + modern APIC interrupts | E-10 | ADR-0015 | ✅ done |
-| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | 🟡 in progress |
+| [WP-04](WP-04-usb-input.md) | USB host controller + HID input | E-20, E-21 | ADR-0015 | ✅ done |
+| [WP-05](WP-05-modern-ui.md) | Modern UI: compositor, fonts, WM, 10 apps, storage UX | E-70..73 | ADR-0017/0018 | 🟡 in progress |
+| [WP-06](WP-06-quantum-control-plane.md) | Quantum control plane: engine, visual lab, QASM toolchain | E-80 | ADR-0019/0021 | ✅ done |
+| [WP-07](WP-07-quantum-ide.md) | Quantum IDE (VS Code-like environment for circuits) | E-80, E-73 | ADR-0021 | ✅ done |
+| [WP-08](WP-08-kernel-foundations.md) | Kernel foundations: preemption, user mode, W^X | E-30/31/11 | ADR-0020+ | 🟡 in progress |
+| [WP-09](WP-09-vfs-unification.md) | VFS unification: one tree over RAM fs/QOSFS/FAT | E-40/41 | ADR-0018+ | 🔴 not started |
+| [WP-10](WP-10-networking.md) | Networking: working NIC + TCP/IP + egress | E-50 | ADR-0011+ | 🔴 not started |
+| [WP-11](WP-11-installer-oobe.md) | Installer & first-boot setup: language, user, disk, login | E-90 | — | 🟡 in progress |
+| [WP-12](WP-12-cloud-qpu-api.md) | Cloud QPU connectivity: QHAL backends + provider API | E-80/81 | ADR-0011+ | 🔴 blocked on WP-10 |
 
-Upcoming (not yet opened as WP files; see the master-plan critical path):
-PCIe ECAM + MSI (E-12) · SMP (E-11) · virtio/NVMe + block/FS (E-24/23/40/41) · modern UI
-compositor (E-70) · quantum transpilation (E-80).
+Upcoming (not yet opened as WP files; see the master-plan critical path and
+[`../TRANSFER_AND_ISSUE_PLAN.md`](../TRANSFER_AND_ISSUE_PLAN.md)):
+PCIe ECAM + MSI (E-12) · SMP (E-11, folded into WP-08 slice 5) · block layer + NVMe/virtio-blk
+(E-23/E-24/E-40) · libc/SDK (E-51) · init/services/logging (E-53) · sound · power management
+(clean ACPI shutdown/reboot).
 
 ## Gaps & correctness backlog
 
@@ -45,3 +55,38 @@ OS" doesn't accrete silent debt. Each should become (or fold into) a WP.
   Blocks cloud-QPU and secure egress. *(open)*
 - **G-08** No real-hardware validation yet (ADR-0014 Stage 4); everything is QEMU+OVMF verified.
   *(open)*
+- **G-09** ~~The desktop runs as one cooperative kernel loop~~ → **resolved** by WP-08 slice 1
+  (43d10e0): the desktop runs with the preemptive scheduler armed; heavy quantum jobs execute on
+  a background kthread while the UI stays live. *(closed 2026-07-02)*
+- **G-10** No process isolation on the desktop path: every "app" shares kernel memory and can,
+  by bug, corrupt any other. → WP-08 slice 3 (user-mode processes). *(open)*
+- **G-11** Windows cannot be resized by edge drag (only min/max); no notifications; no wallpaper
+  options. → WP-05 next slices. *(open)*
+- **G-12** ~~`ParseError` carries no line~~ → **resolved** by WP-07 slice 2 (a0b3753): errors
+  carry their 1-based line; IDE problems row + red gutter + F8 jump. *(closed 2026-07-02)*
+- **G-13** ~~Editors were append/backspace-only~~ → **resolved** by WP-07 slices 1+3 (9125d8f):
+  shared `ed_*` cursor-editing core in both the IDE and the Text Editor. *(closed 2026-07-02)*
+- **G-14** Three disjoint filesystems + `disk:` special-casing in apps; no mount tree. → WP-09.
+  *(open)*
+- **G-15** The NIC driver targets E1000 (8086:100e) but q35 exposes e1000e (8086:10d3) — no
+  network at all today. → WP-10 slice 1. *(open)*
+- **G-16** No clean shutdown/reboot path surfaced in the UI (ACPI poweroff exists only as legacy
+  code, see G-01). Fold into a power-management WP. *(open)*
+- **G-17** Editor niceties deferred from WP-07 v1: text selections + clipboard, gate-name
+  autocompletion, QASM import into the visual Lab (code → circuit), per-glyph click-to-position
+  metrics. *(open)*
+- **G-18** PCIe ECAM + MSI/MSI-X are not implemented yet. This blocks the clean modern-device path
+  for NVMe, virtio, newer NICs and MSI-capable USB/storage devices. *(open; issue draft in
+  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-19** No uniform block layer/request queue/cache yet; AHCI/QOSFS exists, but filesystems and
+  modern storage drivers need a shared block-device contract before NVMe/virtio-blk can mature.
+  *(open; issue draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-20** Ring-3 exists, but there is no libc/SDK path for third-party userland apps. Raw syscall
+  demos prove the kernel path; a real OS needs documented build/link/run support. *(open; issue
+  draft in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-21** No init/service manager or dmesg/syslog-style service logging yet; background work is
+  still exposed as bespoke kernel/UI state. *(open; issue draft in
+  `docs/TRANSFER_AND_ISSUE_PLAN.md`)*
+- **G-22** Transfer-to-organization follow-up: after moving the repository under Heptapus Open Code
+  Organization, open WP/gap issues in priority order and update the local `origin` remote. *(open;
+  checklist in `docs/TRANSFER_AND_ISSUE_PLAN.md`)*

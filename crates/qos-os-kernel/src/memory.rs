@@ -115,7 +115,12 @@ unsafe fn active_level_4_table(physical_memory_offset: VirtAddr) -> &'static mut
 
 pub struct BootInfoFrameAllocator {
     memory_regions: &'static MemoryRegions,
-    next: usize,
+    /// Index of the usable region the cursor is in, and the next free frame address within it.
+    /// This is an **O(1)** cursor: `allocate_frame` advances `next_addr` (and steps to the next
+    /// region at its end) instead of rebuilding+skipping the whole iterator each call. The old
+    /// `usable_frames().nth(next)` was O(n²), which made a large (64 MiB) heap map take minutes.
+    region_idx: usize,
+    next_addr: u64,
     recycled: Vec<PhysFrame<Size4KiB>>,
 }
 
@@ -123,7 +128,8 @@ impl BootInfoFrameAllocator {
     pub unsafe fn init(memory_regions: &'static MemoryRegions) -> Self {
         BootInfoFrameAllocator {
             memory_regions,
-            next: 0,
+            region_idx: 0,
+            next_addr: 0,
             recycled: Vec::new(),
         }
     }
@@ -132,15 +138,6 @@ impl BootInfoFrameAllocator {
         // MVP: simple LIFO recycle list.
         self.recycled.push(frame);
     }
-
-    fn usable_frames(&self) -> impl Iterator<Item = PhysFrame<Size4KiB>> {
-        // bootloader 0.11: iterate usable MemoryRegions and step through them in 4 KiB frames.
-        let regions = self.memory_regions.iter();
-        let usable = regions.filter(|r| r.kind == MemoryRegionKind::Usable);
-        let addr_ranges = usable.map(|r| r.start..r.end);
-        let frame_addresses = addr_ranges.flat_map(|r| r.step_by(4096));
-        frame_addresses.map(|addr| PhysFrame::containing_address(PhysAddr::new(addr)))
-    }
 }
 
 unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
@@ -148,9 +145,30 @@ unsafe impl FrameAllocator<Size4KiB> for BootInfoFrameAllocator {
         if let Some(frame) = self.recycled.pop() {
             return Some(frame);
         }
-        let frame = self.usable_frames().nth(self.next);
-        self.next += 1;
-        frame
+        // Walk usable regions from the cursor, handing out the next 4 KiB frame in O(1) amortized.
+        loop {
+            if self.region_idx >= self.memory_regions.len() {
+                return None;
+            }
+            let region = &self.memory_regions[self.region_idx];
+            if region.kind != MemoryRegionKind::Usable {
+                self.region_idx += 1;
+                self.next_addr = 0;
+                continue;
+            }
+            // Initialize / align the cursor into this region on first entry.
+            let mut addr = self.next_addr;
+            if addr < region.start {
+                addr = (region.start + 4095) & !4095;
+            }
+            if addr + 4096 <= region.end {
+                self.next_addr = addr + 4096;
+                return Some(PhysFrame::containing_address(PhysAddr::new(addr)));
+            }
+            // Region exhausted — advance to the next one.
+            self.region_idx += 1;
+            self.next_addr = 0;
+        }
     }
 }
 

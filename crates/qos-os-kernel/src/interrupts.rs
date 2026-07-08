@@ -18,6 +18,8 @@ pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 pub const SPURIOUS_VECTOR: u8 = 0xFF;
 /// Vector the local-APIC timer delivers on once we move the scheduler tick off the PIT (E-10).
 pub const APIC_TIMER_VECTOR: u8 = 0x40;
+/// Vector the xHCI controller's MSI-X interrupt delivers on (WP-04 step 5). Any free vector > 31.
+pub const XHCI_VECTOR: u8 = 0x41;
 
 /// True once the scheduler tick is delivered by the local-APIC timer (EOI goes to the APIC, not
 /// the PIC). Set by `apic::start_apic_timer_100hz`.
@@ -95,6 +97,9 @@ lazy_static! {
         // Local-APIC spurious vector (E-10): fired by the APIC on rare conditions; needs a
         // present IDT entry so it doesn't #GP, and requires NO end-of-interrupt.
         idt[SPURIOUS_VECTOR].set_handler_fn(spurious_interrupt_handler);
+
+        // xHCI USB controller MSI-X interrupt (WP-04 step 5): delivered straight to the local APIC.
+        idt[XHCI_VECTOR].set_handler_fn(xhci_interrupt_handler);
 
         // Syscall entry point (Milestone 2): shared-memory ABI.
         idt[0x80]
@@ -331,4 +336,12 @@ extern "x86-interrupt" fn mouse_interrupt_handler(_stack_frame: InterruptStackFr
     crate::mouse::handle_interrupt();
 
     eoi_external(InterruptIndex::Mouse.as_u8());
+}
+
+/// xHCI MSI-X interrupt (WP-04 step 5). The controller acknowledges itself inside `on_interrupt`
+/// (clears EINT/IP and drains the event ring); the message was delivered by the local APIC, so the
+/// end-of-interrupt always goes to the local APIC.
+extern "x86-interrupt" fn xhci_interrupt_handler(_stack_frame: InterruptStackFrame) {
+    crate::xhci::on_interrupt();
+    crate::apic::eoi();
 }

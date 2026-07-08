@@ -83,4 +83,4 @@ docker-compose build --no-cache
 After successful build:
 - User mode process support (requires LLVM bug fix ✅)
 - VESA framebuffer (requires LLVM bug fix ✅)
-- See ROADMAP.md for full feature list
+- See docs/MASTERPLAN.md for the full plan and docs/wp/ for the work packages
