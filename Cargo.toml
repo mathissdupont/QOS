@@ -15,6 +15,12 @@ members = [
 ]
 resolver = "2"
 
+# Shared package metadata inherited by crates that opt in with `license.workspace = true`.
+# The whole repository is governed by the top-level LICENSE (AGPL-3.0-only) regardless.
+[workspace.package]
+license = "AGPL-3.0-only"
+repository = "https://github.com/Heptapus-Open-Code-Organization/QOS"
+
 [profile.dev]
 panic = "abort"
 

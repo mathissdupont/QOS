@@ -57,8 +57,8 @@ toolchain version, and the serial log if available.
 
 ## License of contributions
 
-QOS is licensed under the **PolyForm Noncommercial License 1.0.0** (see [LICENSE](LICENSE)) — a
-source-available, **noncommercial** license. By submitting a contribution, you agree that it is
-licensed under the same terms. This is not an OSI open-source license: commercial use of QOS is
-not permitted without a separate arrangement (contact **contact@heptapusgroup.com**). If you have
+QOS is licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0-only; see
+[LICENSE](LICENSE)) — an OSI-approved, strong-copyleft open-source license. By submitting a
+contribution, you agree that it is licensed under the same terms and that you have the right to
+license it that way. No separate contributor license agreement (CLA) is required. If you have
 licensing concerns, please open an issue first.

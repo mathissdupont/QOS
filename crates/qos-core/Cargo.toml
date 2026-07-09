@@ -2,6 +2,8 @@
 name = "qos-core"
 version = "0.1.0"
 edition = "2021"
+license.workspace = true
+repository.workspace = true
 description = "QOS quantum control-plane core runtime (no_std + alloc). See docs/adr/0003."
 
 [features]
