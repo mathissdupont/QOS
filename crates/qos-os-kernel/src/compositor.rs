@@ -1148,14 +1148,19 @@ impl Desktop {
     /// Used by both drawing and click hit-testing.
     fn files_list(&self) -> Vec<(String, bool, usize)> {
         let mut list = Vec::new();
+        // Listing goes through the VFS facade (WP-09 slice 2): `/disk` for the persistent volume,
+        // `/ram[/cwd]` for the RAM tree. Entries are mapped to the app's (name, is_dir, size) tuple.
+        let map = |v: Vec<crate::vfs::Entry>| -> Vec<(String, bool, usize)> {
+            v.into_iter().map(|e| (e.name, e.is_dir, e.size)).collect()
+        };
         if self.files_on_disk {
             list.push(("..".to_string(), true, 0));
-            let mut entries = crate::diskfs::get_entries(b"");
+            let mut entries = map(crate::vfs::entries(b"/disk").unwrap_or_default());
             entries.sort_by(|a, b| a.0.cmp(&b.0));
             list.extend(entries);
             return list;
         }
-        let mut entries = crate::fs::get_entries(self.files_cwd.as_bytes());
+        let mut entries = map(crate::vfs::entries(self.files_ram_dir().as_bytes()).unwrap_or_default());
         entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         if !self.files_cwd.is_empty() {
             list.push(("..".to_string(), true, 0));
@@ -1356,6 +1361,29 @@ impl Desktop {
         }
     }
 
+    /// The VFS path for `name` at the Files app's current location (WP-09 slice 2): the
+    /// persistent disk mount (`/disk/<name>`, flat QOSFS) when browsing it, otherwise the RAM
+    /// path under the current directory. All Files file I/O goes through `crate::vfs` on this
+    /// path — no app-level `disk:` special-casing.
+    fn files_vfs_path(&self, name: &str) -> String {
+        if self.files_on_disk {
+            format!("/disk/{}", name)
+        } else {
+            self.files_path(name)
+        }
+    }
+
+    /// The VFS listing path for the current RAM-fs directory (`/ram` or `/ram/<cwd>`). Using the
+    /// explicit `/ram` mount avoids the virtual root's synthetic mount entries so the Files app
+    /// renders its own "Disk (SATA)" location instead.
+    fn files_ram_dir(&self) -> String {
+        if self.files_cwd.is_empty() {
+            "/ram".to_string()
+        } else {
+            format!("/ram/{}", self.files_cwd)
+        }
+    }
+
     /// Navigate the Files app into `name` (a subdir) or up (`..`), or select+preview a file.
     fn files_click(&mut self, name: &str, is_dir: bool) {
         self.files_status.clear();
@@ -1369,15 +1397,15 @@ impl Desktop {
             } else {
                 // Select + preview a disk file.
                 self.files_sel = Some(name.to_string());
-                self.files_preview = Some(match crate::diskfs::read(name.as_bytes()) {
-                    Some(bytes) => {
+                self.files_preview = Some(match crate::vfs::read(self.files_vfs_path(name).as_bytes()) {
+                    Ok(bytes) => {
                         let mut s = String::new();
                         for &b in bytes.iter().take(400) {
                             s.push(if b == b'\n' || (0x20..0x7f).contains(&b) { b as char } else { '.' });
                         }
                         s
                     }
-                    None => "(cannot read)".to_string(),
+                    Err(_) => "(cannot read)".to_string(),
                 });
             }
             self.mark_full();
@@ -1418,16 +1446,15 @@ impl Desktop {
         } else {
             // Select the file and preview its text.
             self.files_sel = Some(name.to_string());
-            let path = self.files_path(name);
-            self.files_preview = Some(match crate::fs::read(path.as_bytes()) {
-                Some(bytes) => {
+            self.files_preview = Some(match crate::vfs::read(self.files_vfs_path(name).as_bytes()) {
+                Ok(bytes) => {
                     let mut s = String::new();
                     for &b in bytes.iter().take(400) {
                         s.push(if b == b'\n' || (0x20..0x7f).contains(&b) { b as char } else { '.' });
                     }
                     s
                 }
-                None => "(cannot read)".to_string(),
+                Err(_) => "(cannot read)".to_string(),
             });
         }
         self.mark_full();
@@ -1530,74 +1557,37 @@ impl Desktop {
             self.mark_full();
             return;
         }
-        if self.files_on_disk {
-            // Persistent-disk (QOSFS, flat) variants of the ops.
-            if !crate::diskfs::is_formatted() {
-                self.files_status = "disk unformatted — run dformat in the Terminal".to_string();
-                self.mark_full();
-                return;
-            }
-            match mode {
-                NameMode::NewFile => match crate::diskfs::write(name.as_bytes(), b"") {
-                    Ok(()) => {
-                        self.files_status = format!("created {} on disk", name);
-                        self.files_sel = Some(name);
-                    }
-                    Err(e) => self.files_status = format!("error: {}", e),
-                },
-                NameMode::NewDir => {
-                    self.files_status = "disk fs is flat (no directories yet)".to_string();
-                }
-                NameMode::Rename => {
-                    // QOSFS has no rename; emulate via read + write + remove.
-                    if let Some(old) = self.files_sel.clone() {
-                        match crate::diskfs::read(old.as_bytes()) {
-                            Some(bytes) => match crate::diskfs::write(name.as_bytes(), &bytes) {
-                                Ok(()) => {
-                                    crate::diskfs::remove(old.as_bytes());
-                                    self.files_status = format!("renamed to {}", name);
-                                    self.files_sel = Some(name);
-                                    self.files_preview = None;
-                                }
-                                Err(e) => self.files_status = format!("error: {}", e),
-                            },
-                            None => self.files_status = "error: cannot read source".to_string(),
-                        }
-                    }
-                }
-            }
-            self.mark_full();
-            return;
-        }
+        // One code path for both locations (WP-09 slice 2): the ops run against the current
+        // location's VFS path. QOSFS is flat, so New Dir there returns "not supported".
         match mode {
             NameMode::NewFile => {
-                let path = self.files_path(&name);
-                match crate::fs::write(path.as_bytes(), b"") {
+                let path = self.files_vfs_path(&name);
+                match crate::vfs::write(path.as_bytes(), b"") {
                     Ok(()) => {
                         self.files_status = format!("created {}", name);
                         self.files_sel = Some(name);
                     }
-                    Err(e) => self.files_status = format!("error: {}", e),
+                    Err(e) => self.files_status = format!("error: {}", e.message()),
                 }
             }
             NameMode::NewDir => {
-                let path = self.files_path(&name);
-                match crate::fs::mkdir(path.as_bytes()) {
+                let path = self.files_vfs_path(&name);
+                match crate::vfs::mkdir(path.as_bytes()) {
                     Ok(()) => self.files_status = format!("created {}/", name),
-                    Err(e) => self.files_status = format!("error: {}", e),
+                    Err(e) => self.files_status = format!("error: {}", e.message()),
                 }
             }
             NameMode::Rename => {
                 if let Some(old) = self.files_sel.clone() {
-                    let from = self.files_path(&old);
-                    let to = self.files_path(&name);
-                    match crate::fs::rename(from.as_bytes(), to.as_bytes()) {
+                    let from = self.files_vfs_path(&old);
+                    let to = self.files_vfs_path(&name);
+                    match crate::vfs::rename(from.as_bytes(), to.as_bytes()) {
                         Ok(()) => {
                             self.files_status = format!("renamed to {}", name);
                             self.files_sel = Some(name);
                             self.files_preview = None;
                         }
-                        Err(e) => self.files_status = format!("error: {}", e),
+                        Err(e) => self.files_status = format!("error: {}", e.message()),
                     }
                 }
             }
@@ -1612,25 +1602,14 @@ impl Desktop {
             self.mark_full();
             return;
         };
-        if self.files_on_disk {
-            if crate::diskfs::remove(name.as_bytes()) {
-                self.files_status = format!("deleted {} from disk", name);
-                self.files_sel = None;
-                self.files_preview = None;
-            } else {
-                self.files_status = "cannot delete (disk)".to_string();
-            }
-            self.mark_full();
-            return;
-        }
-        let path = self.files_path(&name);
-        match crate::fs::remove(path.as_bytes()) {
+        let path = self.files_vfs_path(&name);
+        match crate::vfs::remove(path.as_bytes()) {
             Ok(()) => {
                 self.files_status = format!("deleted {}", name);
                 self.files_sel = None;
                 self.files_preview = None;
             }
-            Err(e) => self.files_status = format!("cannot delete: {}", e),
+            Err(e) => self.files_status = format!("cannot delete: {}", e.message()),
         }
         self.mark_full();
     }
@@ -1643,29 +1622,16 @@ impl Desktop {
             return;
         };
         // `.qasm` sources open in QASM Studio (the quantum toolchain); everything else in the
-        // plain Text Editor.
+        // plain Text Editor. Both open on a VFS path (`/disk/<name>` or RAM) — no `disk:` prefix.
         let is_qasm = name.ends_with(".qasm");
-        if self.files_on_disk {
-            let path = format!("disk:{}", name);
-            if is_qasm {
-                let content = crate::diskfs::read(name.as_bytes())
-                    .map(|b| String::from_utf8_lossy(&b).into_owned())
-                    .unwrap_or_default();
-                self.qasm_open(Some(path), content);
-            } else {
-                self.editor_open(&path);
-                self.open_app(AppKind::Editor);
-            }
-            return;
-        }
-        if crate::fs::is_dir(self.files_path(&name).as_bytes()) {
+        if !self.files_on_disk && crate::fs::is_dir(self.files_path(&name).as_bytes()) {
             self.files_status = "cannot edit a directory".to_string();
             self.mark_full();
             return;
         }
-        let path = self.files_path(&name);
+        let path = self.files_vfs_path(&name);
         if is_qasm {
-            let content = crate::fs::read(path.as_bytes())
+            let content = crate::vfs::read(path.as_bytes())
                 .map(|b| String::from_utf8_lossy(&b).into_owned())
                 .unwrap_or_default();
             self.qasm_open(Some(path), content);
@@ -1675,21 +1641,16 @@ impl Desktop {
         }
     }
 
-    /// Load `path` into the Text Editor buffer. A `disk:` prefix targets the persistent disk
-    /// (QOSFS); anything else is the RAM fs.
+    /// Load `path` into the Text Editor buffer via the VFS facade (RAM path or `/disk/…`).
     fn editor_open(&mut self, path: &str) {
-        let bytes = match path.strip_prefix("disk:") {
-            Some(name) => crate::diskfs::read(name.as_bytes()),
-            None => crate::fs::read(path.as_bytes()),
-        };
-        match bytes {
-            Some(bytes) => {
+        match crate::vfs::read(path.as_bytes()) {
+            Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes).into_owned();
                 ed_set_text(&mut self.editor_lines, &mut self.editor_cur, &text);
                 self.editor_path = Some(path.to_string());
                 self.editor_status = format!("editing {}  ({} bytes)", path, bytes.len());
             }
-            None => {
+            Err(_) => {
                 ed_set_text(&mut self.editor_lines, &mut self.editor_cur, "");
                 self.editor_path = Some(path.to_string());
                 self.editor_status = format!("editing {}  (new)", path);
@@ -1697,19 +1658,14 @@ impl Desktop {
         }
     }
 
-    /// Save the Text Editor buffer back to its file — the persistent disk for `disk:` paths, the
-    /// RAM fs otherwise.
+    /// Save the Text Editor buffer back to its file through the VFS facade.
     fn editor_save(&mut self) {
         match self.editor_path.clone() {
             Some(path) => {
                 let text = ed_text(&self.editor_lines);
-                let res = match path.strip_prefix("disk:") {
-                    Some(name) => crate::diskfs::write(name.as_bytes(), text.as_bytes()),
-                    None => crate::fs::write(path.as_bytes(), text.as_bytes()),
-                };
-                match res {
+                match crate::vfs::write(path.as_bytes(), text.as_bytes()) {
                     Ok(()) => self.editor_status = format!("saved {}  ({} bytes)", path, text.len()),
-                    Err(e) => self.editor_status = format!("save error: {}", e),
+                    Err(e) => self.editor_status = format!("save error: {}", e.message()),
                 }
             }
             None => self.editor_status = "no file — create one from Files first".to_string(),
@@ -1978,20 +1934,17 @@ impl Desktop {
         self.mark_top_window();
     }
 
-    /// Save the buffer to its backing file (RAM fs or `disk:`), defaulting to `draft.qasm`.
+    /// Save the buffer to its backing file via the VFS facade (RAM path or `/disk/…`),
+    /// defaulting to `draft.qasm` in the RAM fs.
     fn qasm_save(&mut self) {
         let path = self.qasm_path.clone().unwrap_or_else(|| "draft.qasm".to_string());
         let text = self.qasm_text();
-        let res = match path.strip_prefix("disk:") {
-            Some(name) => crate::diskfs::write(name.as_bytes(), text.as_bytes()),
-            None => crate::fs::write(path.as_bytes(), text.as_bytes()),
-        };
-        self.qasm_status = match res {
+        self.qasm_status = match crate::vfs::write(path.as_bytes(), text.as_bytes()) {
             Ok(()) => {
                 self.qasm_path = Some(path.clone());
                 format!("saved {} ({} B)", path, text.len())
             }
-            Err(e) => format!("save error: {}", e),
+            Err(e) => format!("save error: {}", e.message()),
         };
         self.mark_top_window();
     }
@@ -2286,7 +2239,7 @@ impl Desktop {
             AppKind::Files => {
                 // Real listing of the current location (RAM fs or the persistent SATA disk).
                 let path = if self.files_on_disk {
-                    "disk:/   (persistent SATA)".to_string()
+                    "/disk   (persistent SATA)".to_string()
                 } else if self.files_cwd.is_empty() {
                     "/".to_string()
                 } else {
